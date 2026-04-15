@@ -1,5 +1,5 @@
-// content/signup-page.js — Content script for OpenAI auth pages (steps 2, 3, 4-receive, 5)
-// Injected on: auth0.openai.com, auth.openai.com, accounts.openai.com
+// content/signup-page.js — Content script for ChatGPT/OpenAI signup and auth pages (steps 2, 3, 4-receive, 5)
+// Injected on: chatgpt.com, auth0.openai.com, auth.openai.com, accounts.openai.com
 
 console.log('[MultiPage:signup-page] Content script loaded on', location.href);
 
@@ -215,14 +215,31 @@ async function resendVerificationCode(step, timeout = 45000) {
 // Step 2: Click Register
 // ============================================================
 
+function isChatGptHomeUrl(rawUrl) {
+  try {
+    const parsed = new URL(String(rawUrl || ''));
+    return parsed.hostname === 'chatgpt.com' && /^\/$/.test(parsed.pathname || '/');
+  } catch {
+    return false;
+  }
+}
+
+function isRegistrationEntryActionText(text) {
+  return /sign\s*up|register|create\s*account|注册/i.test(String(text || '').trim());
+}
+
+const REGISTRATION_ENTRY_ACTION_PATTERN = /sign\s*up|register|create\s*account|注册/i;
+
 async function step2_clickRegister() {
-  log('步骤 2：正在查找注册按钮...');
+  log(isChatGptHomeUrl(location.href)
+    ? '步骤 2：正在查找 ChatGPT 注册入口...'
+    : '步骤 2：正在查找注册按钮...');
 
   let registerBtn = null;
   try {
     registerBtn = await waitForElementByText(
       'a, button, [role="button"], [role="link"]',
-      /sign\s*up|register|create\s*account|注册/i,
+      REGISTRATION_ENTRY_ACTION_PATTERN,
       10000
     );
   } catch {
@@ -231,8 +248,8 @@ async function step2_clickRegister() {
       registerBtn = await waitForElement('a[href*="signup"], a[href*="register"]', 5000);
     } catch {
       throw new Error(
-        '未找到注册按钮。' +
-        '请在 DevTools 中检查认证页面 DOM。URL: ' + location.href
+        (isChatGptHomeUrl(location.href) ? '未找到 ChatGPT 注册入口。' : '未找到注册按钮。') +
+        '请在 DevTools 中检查当前页面 DOM。URL: ' + location.href
       );
     }
   }
@@ -287,7 +304,7 @@ async function step3_fillEmailPassword(payload) {
     try {
       passwordInput = await waitForElement('input[type="password"]', 10000);
     } catch {
-      throw new Error('提交邮箱后仍未找到密码输入框。URL: ' + location.href);
+      throw new Error(`提交邮箱后仍未进入${getRegistrationStateLabel({ state: 'password_page' })}。URL: ${location.href}`);
     }
   }
 
@@ -782,6 +799,19 @@ function serializeLoginAuthState(snapshot) {
     oauthConsentPage: Boolean(snapshot?.oauthConsentPage),
     consentReady: Boolean(snapshot?.consentReady),
   };
+}
+
+function getRegistrationStateLabel(snapshot) {
+  switch (snapshot?.state) {
+    case 'verification_page':
+      return '注册验证码页';
+    case 'password_page':
+      return '注册密码页';
+    case 'email_page':
+      return '注册邮箱页';
+    default:
+      return '未知页面';
+  }
 }
 
 function getLoginAuthStateLabel(snapshot) {

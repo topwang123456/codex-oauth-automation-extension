@@ -204,6 +204,34 @@ const PERSISTED_SETTING_KEYS = Object.keys(PERSISTED_SETTING_DEFAULTS);
 const SETTINGS_EXPORT_SCHEMA_VERSION = 1;
 const SETTINGS_EXPORT_FILENAME_PREFIX = 'multipage-settings';
 
+function createEmptyRunContext() {
+  return {
+    incognitoWindowId: null,
+    chatgptTabId: null,
+    cpaTabId: null,
+    oauthTabId: null,
+  };
+}
+
+function resetRunContext() {
+  return createEmptyRunContext();
+}
+
+function ensureIncognitoAllowed(allowed) {
+  if (!allowed) {
+    throw new Error('当前扩展未启用无痕模式，请先在 chrome://extensions 中允许该扩展在无痕模式下运行。');
+  }
+}
+
+function normalizeIncognitoBootstrapResult(windowInfo, tabInfo) {
+  return {
+    incognitoWindowId: Number.isFinite(Number(windowInfo?.id)) ? Number(windowInfo.id) : null,
+    chatgptTabId: Number.isFinite(Number(tabInfo?.id)) ? Number(tabInfo.id) : null,
+    cpaTabId: null,
+    oauthTabId: null,
+  };
+}
+
 const DEFAULT_STATE = {
   currentStep: 0, // 当前流程执行到的步骤编号。
   stepStatuses: {
@@ -225,6 +253,12 @@ const DEFAULT_STATE = {
   sub2apiGroupId: null, // SUB2API 目标分组 ID。
   sub2apiDraftName: null, // SUB2API 本轮预生成的账号名称。
   flowStartTime: null, // 当前流程开始时间。
+  runContext: {
+    incognitoWindowId: null,
+    chatgptTabId: null,
+    cpaTabId: null,
+    oauthTabId: null,
+  },
   tabRegistry: {}, // 程序维护的标签页注册表。
   sourceLastUrls: {}, // 各来源页面最近一次打开的地址记录。
   logs: [], // 侧边栏展示的运行日志。
