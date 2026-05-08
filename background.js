@@ -313,6 +313,10 @@ const AUTO_RUN_DELAY_MIN_MINUTES = 1;
 const AUTO_RUN_DELAY_MAX_MINUTES = 1440;
 const AUTO_RUN_RETRY_DELAY_MS = 3000;
 const AUTO_RUN_MAX_RETRIES_PER_ROUND = 3;
+const HERO_SMS_WATCH_BATCH_SIZE = 3;
+const HERO_SMS_WATCH_MIN_INTERVAL_SECONDS = 5;
+const HERO_SMS_WATCH_MAX_INTERVAL_SECONDS = 3600;
+const DEFAULT_HERO_SMS_WATCH_INTERVAL_SECONDS = 30;
 const AUTO_STEP_DELAY_MIN_ALLOWED_SECONDS = 0;
 const AUTO_STEP_DELAY_MAX_ALLOWED_SECONDS = 600;
 const VERIFICATION_RESEND_COUNT_MIN = 0;
@@ -645,6 +649,8 @@ const PERSISTED_SETTING_DEFAULTS = {
   oauthFlowTimeoutEnabled: true,
   autoRunDelayEnabled: false,
   autoRunDelayMinutes: 30,
+  heroSmsWatchEnabled: false,
+  heroSmsWatchIntervalSeconds: DEFAULT_HERO_SMS_WATCH_INTERVAL_SECONDS,
   autoStepDelaySeconds: null,
   step6CookieCleanupEnabled: false,
   phoneVerificationEnabled: false,
@@ -853,6 +859,14 @@ const DEFAULT_STATE = {
   autoRunCountdownAt: null,
   autoRunCountdownTitle: '',
   autoRunCountdownNote: '',
+  heroSmsWatchPhase: 'idle',
+  heroSmsWatchTargetRuns: 0,
+  heroSmsWatchEffectiveTotalRuns: 0,
+  heroSmsWatchCompletedRuns: 0,
+  heroSmsWatchCurrentBatchRun: 0,
+  heroSmsWatchActivation: null,
+  heroSmsWatchLastError: '',
+  heroSmsWatchNextPollAt: null,
   signupVerificationRequestedAt: null,
   loginVerificationRequestedAt: null,
   oauthFlowDeadlineAt: null,
@@ -887,6 +901,31 @@ function normalizeAutoRunDelayMinutes(value) {
     AUTO_RUN_DELAY_MAX_MINUTES,
     Math.max(AUTO_RUN_DELAY_MIN_MINUTES, Math.floor(numeric))
   );
+}
+
+function normalizeHeroSmsWatchIntervalSeconds(value) {
+  const numeric = Math.floor(Number(value));
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    return DEFAULT_HERO_SMS_WATCH_INTERVAL_SECONDS;
+  }
+  return Math.min(
+    HERO_SMS_WATCH_MAX_INTERVAL_SECONDS,
+    Math.max(HERO_SMS_WATCH_MIN_INTERVAL_SECONDS, numeric)
+  );
+}
+
+function resolveHeroSmsWatchEffectiveTotalRuns(totalRuns) {
+  const normalized = Math.max(1, Math.floor(Number(totalRuns) || 1));
+  return Math.max(
+    HERO_SMS_WATCH_BATCH_SIZE,
+    Math.ceil(normalized / HERO_SMS_WATCH_BATCH_SIZE) * HERO_SMS_WATCH_BATCH_SIZE
+  );
+}
+
+function resolveHeroSmsWatchNextBatchSize(completedRuns, effectiveTotalRuns) {
+  const completed = Math.max(0, Math.floor(Number(completedRuns) || 0));
+  const total = resolveHeroSmsWatchEffectiveTotalRuns(effectiveTotalRuns);
+  return completed >= total ? 0 : Math.min(HERO_SMS_WATCH_BATCH_SIZE, total - completed);
 }
 
 function normalizeAutoRunFallbackThreadIntervalMinutes(value) {
@@ -2355,6 +2394,7 @@ function normalizePersistentSettingValue(key, value) {
     case 'oauthFlowTimeoutEnabled':
     case 'gopayHelperLocalSmsHelperEnabled':
     case 'autoRunDelayEnabled':
+    case 'heroSmsWatchEnabled':
     case 'step6CookieCleanupEnabled':
     case 'phoneVerificationEnabled':
     case 'freePhoneReuseEnabled':
@@ -2369,6 +2409,8 @@ function normalizePersistentSettingValue(key, value) {
       return normalizeAutoRunFallbackThreadIntervalMinutes(value);
     case 'autoRunDelayMinutes':
       return normalizeAutoRunDelayMinutes(value);
+    case 'heroSmsWatchIntervalSeconds':
+      return normalizeHeroSmsWatchIntervalSeconds(value);
     case 'autoStepDelaySeconds':
       return normalizeAutoStepDelaySeconds(value, PERSISTED_SETTING_DEFAULTS.autoStepDelaySeconds);
     case 'verificationResendCount':
@@ -7951,6 +7993,35 @@ async function broadcastAutoRunStatus(phase, payload = {}, extraState = {}) {
   }).catch(() => { });
 }
 
+async function broadcastHeroSmsWatchStatus(phase, payload = {}, extraState = {}) {
+  const statusPayload = {
+    phase,
+    targetRuns: Math.max(0, Math.floor(Number(payload.targetRuns) || 0)),
+    effectiveTotalRuns: Math.max(0, Math.floor(Number(payload.effectiveTotalRuns) || 0)),
+    completedRuns: Math.max(0, Math.floor(Number(payload.completedRuns) || 0)),
+    currentBatchRun: Math.max(0, Math.floor(Number(payload.currentBatchRun) || 0)),
+    nextPollAt: payload.nextPollAt === null || payload.nextPollAt === undefined ? null : Number(payload.nextPollAt),
+    activation: payload.activation ?? null,
+    lastError: payload.lastError === undefined ? '' : String(payload.lastError || ''),
+  };
+
+  await setState({
+    ...extraState,
+    heroSmsWatchPhase: phase,
+    heroSmsWatchTargetRuns: statusPayload.targetRuns,
+    heroSmsWatchEffectiveTotalRuns: statusPayload.effectiveTotalRuns,
+    heroSmsWatchCompletedRuns: statusPayload.completedRuns,
+    heroSmsWatchCurrentBatchRun: statusPayload.currentBatchRun,
+    heroSmsWatchNextPollAt: statusPayload.nextPollAt,
+    heroSmsWatchActivation: statusPayload.activation,
+    heroSmsWatchLastError: statusPayload.lastError,
+  });
+  chrome.runtime.sendMessage({
+    type: 'HERO_SMS_WATCH_STATUS',
+    payload: statusPayload,
+  }).catch(() => { });
+}
+
 function isAutoRunLockedState(state) {
   return Boolean(state.autoRunning)
     && (
@@ -10614,6 +10685,19 @@ const phoneVerificationHelpers = self.MultiPageBackgroundPhoneVerification?.crea
   throwIfStopped,
   createFiveSimProvider: self.PhoneSmsFiveSimProvider?.createProvider,
 });
+
+async function prebuyHeroSmsActivationForWatch(state = {}) {
+  return phoneVerificationHelpers.prebuyHeroSmsActivationForWatch(state);
+}
+
+async function cancelHeroSmsWatchActivation(state = {}, activation = null) {
+  return phoneVerificationHelpers.cancelPhoneActivation(state, activation);
+}
+
+async function persistHeroSmsWatchCurrentActivation(activation = null) {
+  return phoneVerificationHelpers.persistCurrentActivation(activation);
+}
+
 const step1Executor = self.MultiPageBackgroundStep1?.createStep1Executor({
   addLog,
   completeStepFromBackground,

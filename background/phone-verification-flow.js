@@ -4216,6 +4216,26 @@
       await setPhoneRuntimeState(updates);
     }
 
+    async function prebuyHeroSmsActivationForWatch(state = {}) {
+      const activation = await requestPhoneActivation({
+        ...state,
+        phoneSmsProvider: PHONE_SMS_PROVIDER_HERO,
+        heroSmsReuseEnabled: true,
+      });
+      const normalizedActivation = normalizeActivation({
+        ...activation,
+        provider: PHONE_SMS_PROVIDER_HERO,
+        source: 'hero-sms-watch-prebuy',
+        successfulUses: 0,
+        maxUses: DEFAULT_PHONE_NUMBER_MAX_USES,
+      });
+      if (!normalizedActivation) {
+        throw new Error('HeroSMS 轮询模式买号失败：接码平台返回的手机号订单无效。');
+      }
+      await persistCurrentActivation(normalizedActivation);
+      return normalizedActivation;
+    }
+
     async function persistReusableActivation(activation) {
       await setPhoneRuntimeState({
         [REUSABLE_PHONE_ACTIVATION_STATE_KEY]: normalizeActivation(activation) || null,
@@ -6239,6 +6259,7 @@
     }
 
     return {
+      cancelPhoneActivation,
       cancelSignupPhoneActivation,
       completeLoginPhoneVerificationFlow,
       completePhoneVerificationFlow,
@@ -6246,7 +6267,9 @@
       finalizeLoginPhoneActivationAfterSuccess,
       finalizeSignupPhoneActivationAfterSuccess,
       normalizeActivation,
+      persistCurrentActivation,
       pollPhoneActivationCode,
+      prebuyHeroSmsActivationForWatch,
       prepareLoginPhoneActivation,
       prepareSignupPhoneActivation,
       reactivatePhoneActivation,
