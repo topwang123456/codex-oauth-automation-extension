@@ -1128,6 +1128,15 @@ let currentAutoRun = {
   countdownTitle: '',
   countdownNote: '',
 };
+let currentHeroSmsWatch = {
+  phase: 'idle',
+  targetRuns: 0,
+  effectiveTotalRuns: 0,
+  completedRuns: 0,
+  currentBatchRun: 0,
+  nextPollAt: null,
+  lastError: '',
+};
 let pendingAutoRunStartTotalRuns = 0;
 let pendingAutoRunStartExpiresAt = 0;
 let settingsDirty = false;
@@ -2349,6 +2358,18 @@ function syncAutoRunState(source = {}) {
     countdownAt: readAutoRunStateValue(source, ['autoRunCountdownAt', 'countdownAt'], currentAutoRun.countdownAt),
     countdownTitle: readAutoRunStateValue(source, ['autoRunCountdownTitle', 'countdownTitle'], currentAutoRun.countdownTitle),
     countdownNote: readAutoRunStateValue(source, ['autoRunCountdownNote', 'countdownNote'], currentAutoRun.countdownNote),
+  };
+}
+
+function syncHeroSmsWatchState(source = {}) {
+  currentHeroSmsWatch = {
+    phase: source.heroSmsWatchPhase ?? source.phase ?? currentHeroSmsWatch.phase,
+    targetRuns: readAutoRunStateValue(source, ['heroSmsWatchTargetRuns', 'targetRuns'], currentHeroSmsWatch.targetRuns),
+    effectiveTotalRuns: readAutoRunStateValue(source, ['heroSmsWatchEffectiveTotalRuns', 'effectiveTotalRuns'], currentHeroSmsWatch.effectiveTotalRuns),
+    completedRuns: readAutoRunStateValue(source, ['heroSmsWatchCompletedRuns', 'completedRuns'], currentHeroSmsWatch.completedRuns),
+    currentBatchRun: readAutoRunStateValue(source, ['heroSmsWatchCurrentBatchRun', 'currentBatchRun'], currentHeroSmsWatch.currentBatchRun),
+    nextPollAt: readAutoRunStateValue(source, ['heroSmsWatchNextPollAt', 'nextPollAt'], currentHeroSmsWatch.nextPollAt),
+    lastError: source.heroSmsWatchLastError ?? source.lastError ?? currentHeroSmsWatch.lastError,
   };
 }
 
@@ -8281,6 +8302,7 @@ function applySettingsState(state) {
     applyOperationDelayState(state);
   }
   syncAutoRunState(state);
+  syncHeroSmsWatchState(state);
   renderStepStatuses(latestState);
 
   inputEmail.value = state?.email || '';
@@ -14182,6 +14204,22 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       if (!['scheduled', 'running', 'waiting_step', 'waiting_email', 'retrying', 'waiting_interval'].includes(message.payload.phase)) {
         scheduleAccountRunHistoryRefresh();
       }
+      break;
+    }
+
+    case 'HERO_SMS_WATCH_STATUS': {
+      syncLatestState({
+        heroSmsWatchPhase: message.payload.phase,
+        heroSmsWatchTargetRuns: message.payload.targetRuns,
+        heroSmsWatchEffectiveTotalRuns: message.payload.effectiveTotalRuns,
+        heroSmsWatchCompletedRuns: message.payload.completedRuns,
+        heroSmsWatchCurrentBatchRun: message.payload.currentBatchRun,
+        heroSmsWatchNextPollAt: message.payload.nextPollAt ?? null,
+        heroSmsWatchLastError: message.payload.lastError ?? '',
+      });
+      syncHeroSmsWatchState(message.payload);
+      updateStatusDisplay(latestState);
+      updateButtonStates();
       break;
     }
   }
