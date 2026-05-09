@@ -373,6 +373,9 @@ const cfDomainMenu = document.getElementById('cf-domain-menu');
 const inputCfDomain = document.getElementById('input-cf-domain');
 const btnCfDomainMode = document.getElementById('btn-cf-domain-mode');
 const inputRunCount = document.getElementById('input-run-count');
+const inputHeroSmsWatchEnabled = document.getElementById('input-hero-sms-watch-enabled');
+const inputHeroSmsWatchIntervalSeconds = document.getElementById('input-hero-sms-watch-interval-seconds');
+const displayHeroSmsWatchEffectiveRuns = document.getElementById('display-hero-sms-watch-effective-runs');
 const inputAutoSkipFailures = document.getElementById('input-auto-skip-failures');
 const inputAutoSkipFailuresThreadIntervalMinutes = document.getElementById('input-auto-skip-failures-thread-interval-minutes');
 const inputStep6CookieCleanupEnabled = document.getElementById('input-step6-cookie-cleanup-enabled');
@@ -550,6 +553,10 @@ const AUTO_FALLBACK_THREAD_INTERVAL_MIN_MINUTES = 0;
 const AUTO_FALLBACK_THREAD_INTERVAL_MAX_MINUTES = 1440;
 const AUTO_FALLBACK_THREAD_INTERVAL_DEFAULT_MINUTES = 0;
 const AUTO_RUN_MAX_RETRIES_PER_ROUND = 3;
+const HERO_SMS_WATCH_BATCH_SIZE = 3;
+const HERO_SMS_WATCH_MIN_INTERVAL_SECONDS = 5;
+const HERO_SMS_WATCH_MAX_INTERVAL_SECONDS = 3600;
+const DEFAULT_HERO_SMS_WATCH_INTERVAL_SECONDS = 30;
 const AUTO_STEP_DELAY_MIN_SECONDS = 0;
 const AUTO_STEP_DELAY_MAX_SECONDS = 600;
 const VERIFICATION_RESEND_COUNT_MIN = 0;
@@ -2663,6 +2670,52 @@ function getRunCountValue() {
   return Math.max(1, parseInt(inputRunCount.value, 10) || 1);
 }
 
+function normalizeHeroSmsWatchIntervalSeconds(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return DEFAULT_HERO_SMS_WATCH_INTERVAL_SECONDS;
+  }
+  return Math.min(
+    HERO_SMS_WATCH_MAX_INTERVAL_SECONDS,
+    Math.max(HERO_SMS_WATCH_MIN_INTERVAL_SECONDS, Math.floor(numeric))
+  );
+}
+
+function resolveHeroSmsWatchEffectiveTotalRuns(totalRuns) {
+  const normalizedTotalRuns = Math.max(1, Math.floor(Number(totalRuns) || 1));
+  return Math.max(HERO_SMS_WATCH_BATCH_SIZE, Math.ceil(normalizedTotalRuns / HERO_SMS_WATCH_BATCH_SIZE) * HERO_SMS_WATCH_BATCH_SIZE);
+}
+
+function isHeroSmsWatchActivePhase(phase = currentHeroSmsWatch.phase) {
+  return ['polling', 'buying', 'running_batch'].includes(String(phase || ''));
+}
+
+function renderHeroSmsWatchStatus() {
+  if (!displayHeroSmsWatchEffectiveRuns) {
+    return;
+  }
+  const totalRuns = getRunCountValue();
+  const effectiveTotalRuns = currentHeroSmsWatch.effectiveTotalRuns || resolveHeroSmsWatchEffectiveTotalRuns(totalRuns);
+  const completedRuns = Math.max(0, Number(currentHeroSmsWatch.completedRuns) || 0);
+  const currentBatchRun = Math.max(0, Number(currentHeroSmsWatch.currentBatchRun) || 0);
+  const active = isHeroSmsWatchActivePhase();
+  const phaseText = active
+    ? `状态 ${currentHeroSmsWatch.phase}，已完成 ${completedRuns}/${effectiveTotalRuns}，当前号 ${currentBatchRun}/3`
+    : `开启后实际执行 ${effectiveTotalRuns} 轮`;
+  displayHeroSmsWatchEffectiveRuns.textContent = phaseText;
+}
+
+function updateHeroSmsWatchInputState(disabled = false) {
+  const active = isHeroSmsWatchActivePhase();
+  if (inputHeroSmsWatchEnabled) {
+    inputHeroSmsWatchEnabled.disabled = disabled || active;
+  }
+  if (inputHeroSmsWatchIntervalSeconds) {
+    inputHeroSmsWatchIntervalSeconds.disabled = disabled || active || !inputHeroSmsWatchEnabled?.checked;
+  }
+  renderHeroSmsWatchStatus();
+}
+
 function updateFallbackThreadIntervalInputState() {
   if (!inputAutoSkipFailuresThreadIntervalMinutes) {
     return;
@@ -3633,6 +3686,10 @@ function collectSettingsPayload() {
     cloudMailReceiveMailbox: normalizeCloudMailReceiveMailboxInput((typeof inputCloudMailReceiveMailbox !== 'undefined' && inputCloudMailReceiveMailbox) ? inputCloudMailReceiveMailbox.value : ''),
     cloudMailDomain: normalizeCloudMailDomainInput((typeof inputCloudMailDomain !== 'undefined' && inputCloudMailDomain) ? inputCloudMailDomain.value : ''),
     autoRunSkipFailures: inputAutoSkipFailures.checked,
+    heroSmsWatchEnabled: typeof inputHeroSmsWatchEnabled !== 'undefined' && Boolean(inputHeroSmsWatchEnabled?.checked),
+    heroSmsWatchIntervalSeconds: typeof inputHeroSmsWatchIntervalSeconds !== 'undefined' && typeof normalizeHeroSmsWatchIntervalSeconds === 'function'
+      ? normalizeHeroSmsWatchIntervalSeconds(inputHeroSmsWatchIntervalSeconds?.value)
+      : 30,
     autoRunFallbackThreadIntervalMinutes: normalizeAutoRunThreadIntervalMinutes(inputAutoSkipFailuresThreadIntervalMinutes.value),
     step6CookieCleanupEnabled: typeof inputStep6CookieCleanupEnabled !== 'undefined' && inputStep6CookieCleanupEnabled
       ? Boolean(inputStep6CookieCleanupEnabled.checked)
@@ -8071,17 +8128,18 @@ function applyAutoRunStatus(payload = currentAutoRun) {
   const locked = isAutoRunLockedPhase();
   const paused = isAutoRunPausedPhase();
   const scheduled = isAutoRunScheduledPhase();
-  const settingsCardLocked = scheduled || locked;
+  const heroSmsWatchActive = typeof isHeroSmsWatchActivePhase === 'function' && isHeroSmsWatchActivePhase();
+  const settingsCardLocked = scheduled || locked || heroSmsWatchActive;
 
   setSettingsCardLocked(settingsCardLocked);
   setFreePhoneReuseControlsLocked(settingsCardLocked);
 
-  inputRunCount.disabled = currentAutoRun.autoRunning || (
+  inputRunCount.disabled = currentAutoRun.autoRunning || heroSmsWatchActive || (
     typeof shouldLockRunCountToEmailPool === 'function'
       ? shouldLockRunCountToEmailPool()
       : getLockedRunCountFromEmailPool() > 0
   );
-  btnAutoRun.disabled = currentAutoRun.autoRunning;
+  btnAutoRun.disabled = currentAutoRun.autoRunning || heroSmsWatchActive;
   btnFetchEmail.disabled = locked
     || isCustomMailProvider()
     || usesCustomEmailPoolGenerator();
@@ -8092,7 +8150,10 @@ function applyAutoRunStatus(payload = currentAutoRun) {
   if (typeof inputSub2ApiAccountPriority !== 'undefined' && inputSub2ApiAccountPriority) {
     inputSub2ApiAccountPriority.disabled = locked;
   }
-  inputAutoSkipFailures.disabled = scheduled;
+  inputAutoSkipFailures.disabled = scheduled || heroSmsWatchActive;
+  if (typeof updateHeroSmsWatchInputState === 'function') {
+    updateHeroSmsWatchInputState(settingsCardLocked);
+  }
 
   const lockedRunCount = typeof getLockedRunCountFromEmailPool === 'function'
     ? getLockedRunCountFromEmailPool()
@@ -8144,10 +8205,20 @@ function applyAutoRunStatus(payload = currentAutoRun) {
       break;
   }
 
+  if (heroSmsWatchActive) {
+    autoContinueBar.style.display = 'none';
+    btnAutoRun.disabled = true;
+    inputRunCount.disabled = true;
+    const effectiveTotalRuns = currentHeroSmsWatch.effectiveTotalRuns || (typeof resolveHeroSmsWatchEffectiveTotalRuns === 'function'
+      ? resolveHeroSmsWatchEffectiveTotalRuns(getRunCountValue())
+      : currentHeroSmsWatch.targetRuns || 0);
+    btnAutoRun.innerHTML = `HeroSMS轮询 (${currentHeroSmsWatch.completedRuns}/${effectiveTotalRuns})`;
+  }
+
   updateAutoDelayInputState();
   updateFallbackThreadIntervalInputState();
   syncScheduledCountdownTicker();
-  updateStopButtonState(scheduled || paused || locked || Object.values(getStepStatuses()).some(status => status === 'running'));
+  updateStopButtonState(scheduled || paused || locked || heroSmsWatchActive || Object.values(getStepStatuses()).some(status => status === 'running'));
   updateConfigMenuControls();
   renderContributionMode();
 }
@@ -8302,7 +8373,9 @@ function applySettingsState(state) {
     applyOperationDelayState(state);
   }
   syncAutoRunState(state);
-  syncHeroSmsWatchState(state);
+  if (typeof syncHeroSmsWatchState === 'function') {
+    syncHeroSmsWatchState(state);
+  }
   renderStepStatuses(latestState);
 
   inputEmail.value = state?.email || '';
@@ -8573,6 +8646,12 @@ function applySettingsState(state) {
   renderCloudflareDomainOptions(state?.cloudflareDomain || '');
   setCloudflareDomainEditMode(false, { clearInput: true });
   inputAutoSkipFailures.checked = Boolean(state?.autoRunSkipFailures);
+  if (typeof inputHeroSmsWatchEnabled !== 'undefined' && inputHeroSmsWatchEnabled) {
+    inputHeroSmsWatchEnabled.checked = Boolean(state?.heroSmsWatchEnabled);
+  }
+  if (typeof inputHeroSmsWatchIntervalSeconds !== 'undefined' && inputHeroSmsWatchIntervalSeconds && typeof normalizeHeroSmsWatchIntervalSeconds === 'function') {
+    inputHeroSmsWatchIntervalSeconds.value = String(normalizeHeroSmsWatchIntervalSeconds(state?.heroSmsWatchIntervalSeconds));
+  }
   inputAutoSkipFailuresThreadIntervalMinutes.value = String(normalizeAutoRunThreadIntervalMinutes(state?.autoRunFallbackThreadIntervalMinutes));
   if (typeof inputStep6CookieCleanupEnabled !== 'undefined' && inputStep6CookieCleanupEnabled) {
     inputStep6CookieCleanupEnabled.checked = Boolean(state?.step6CookieCleanupEnabled);
@@ -10264,6 +10343,7 @@ function updateButtonStates() {
   const anyRunning = Object.values(statuses).some(s => s === 'running');
   const autoLocked = isAutoRunLockedPhase();
   const autoScheduled = isAutoRunScheduledPhase();
+  const heroSmsWatchActive = typeof isHeroSmsWatchActivePhase === 'function' && isHeroSmsWatchActivePhase();
   const icloudTargetMailboxTypeValue = typeof selectIcloudTargetMailboxType !== 'undefined'
     ? selectIcloudTargetMailboxType?.value
     : latestState?.icloudTargetMailboxType;
@@ -10272,7 +10352,7 @@ function updateButtonStates() {
     const btn = document.querySelector(`.step-btn[data-step="${step}"]`);
     if (!btn) continue;
 
-    if (anyRunning || autoLocked || autoScheduled) {
+    if (anyRunning || autoLocked || autoScheduled || heroSmsWatchActive) {
       btn.disabled = true;
     } else if (step === 1) {
       btn.disabled = false;
@@ -10292,7 +10372,7 @@ function updateButtonStates() {
     const prevStep = currentIndex > 0 ? STEP_IDS[currentIndex - 1] : null;
     const prevStatus = prevStep === null ? 'completed' : statuses[prevStep];
 
-    if (!SKIPPABLE_STEPS.has(step) || anyRunning || autoLocked || autoScheduled || currentStatus === 'running' || isDoneStatus(currentStatus)) {
+    if (!SKIPPABLE_STEPS.has(step) || anyRunning || autoLocked || autoScheduled || heroSmsWatchActive || currentStatus === 'running' || isDoneStatus(currentStatus)) {
       btn.style.display = 'none';
       btn.disabled = true;
       btn.title = '当前不可跳过';
@@ -10311,8 +10391,8 @@ function updateButtonStates() {
     btn.title = `跳过步骤 ${step}`;
   });
 
-  btnReset.disabled = anyRunning || autoScheduled || isAutoRunPausedPhase() || autoLocked;
-  const disableIcloudControls = anyRunning || autoScheduled || autoLocked;
+  btnReset.disabled = anyRunning || autoScheduled || isAutoRunPausedPhase() || autoLocked || heroSmsWatchActive;
+  const disableIcloudControls = anyRunning || autoScheduled || autoLocked || heroSmsWatchActive;
   if (btnIcloudRefresh) btnIcloudRefresh.disabled = disableIcloudControls;
   if (btnIcloudDeleteUsed) btnIcloudDeleteUsed.disabled = disableIcloudControls || !hasDeletableUsedIcloudAliases();
   if (selectIcloudHostPreference) selectIcloudHostPreference.disabled = disableIcloudControls;
@@ -10333,7 +10413,10 @@ function updateButtonStates() {
   }
   if (checkboxAutoDeleteIcloud) checkboxAutoDeleteIcloud.disabled = disableIcloudControls;
   if (btnContributionMode) btnContributionMode.disabled = isContributionButtonLocked();
-  updateStopButtonState(anyRunning || autoScheduled || isAutoRunPausedPhase() || autoLocked);
+  if (typeof updateHeroSmsWatchInputState === 'function') {
+    updateHeroSmsWatchInputState(disableIcloudControls);
+  }
+  updateStopButtonState(anyRunning || autoScheduled || isAutoRunPausedPhase() || autoLocked || heroSmsWatchActive);
   renderContributionMode();
 }
 
@@ -11372,6 +11455,11 @@ btnSaveSettings.addEventListener('click', async () => {
 
 btnStop.addEventListener('click', async () => {
   btnStop.disabled = true;
+  if (typeof isHeroSmsWatchActivePhase === 'function' && isHeroSmsWatchActivePhase()) {
+    await chrome.runtime.sendMessage({ type: 'STOP_HERO_SMS_WATCH_AUTO_RUN', source: 'sidepanel', payload: {} });
+    showToast('正在停止 HeroSMS 轮询模式...', 'warn', 2000);
+    return;
+  }
   await chrome.runtime.sendMessage({ type: 'STOP_FLOW', source: 'sidepanel', payload: {} });
   showToast(isAutoRunScheduledPhase() ? '正在取消倒计时计划...' : '正在停止当前流程...', 'warn', 2000);
 });
@@ -11506,18 +11594,28 @@ async function startAutoRunFromCurrentSettings() {
 
   btnAutoRun.disabled = true;
   inputRunCount.disabled = true;
-  const delayEnabled = inputAutoDelayEnabled.checked;
+  const heroSmsWatchEnabled = typeof inputHeroSmsWatchEnabled !== 'undefined' && Boolean(inputHeroSmsWatchEnabled?.checked);
+  const heroSmsWatchIntervalSeconds = heroSmsWatchEnabled && typeof normalizeHeroSmsWatchIntervalSeconds === 'function'
+    ? normalizeHeroSmsWatchIntervalSeconds(typeof inputHeroSmsWatchIntervalSeconds !== 'undefined' ? inputHeroSmsWatchIntervalSeconds?.value : undefined)
+    : 0;
+  if (typeof inputHeroSmsWatchIntervalSeconds !== 'undefined' && inputHeroSmsWatchIntervalSeconds && heroSmsWatchEnabled) {
+    inputHeroSmsWatchIntervalSeconds.value = String(heroSmsWatchIntervalSeconds);
+  }
+  const delayEnabled = !heroSmsWatchEnabled && inputAutoDelayEnabled.checked;
   const delayMinutes = normalizeAutoDelayMinutes(inputAutoDelayMinutes.value);
   inputAutoDelayMinutes.value = String(delayMinutes);
-  btnAutoRun.innerHTML = delayEnabled
-    ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg> 计划中...'
-    : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg> 运行中...';
+  btnAutoRun.innerHTML = heroSmsWatchEnabled
+    ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg> 轮询中...'
+    : (delayEnabled
+      ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg> 计划中...'
+      : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg> 运行中...');
   const response = await chrome.runtime.sendMessage({
-    type: delayEnabled ? 'SCHEDULE_AUTO_RUN' : 'AUTO_RUN',
+    type: heroSmsWatchEnabled ? 'START_HERO_SMS_WATCH_AUTO_RUN' : (delayEnabled ? 'SCHEDULE_AUTO_RUN' : 'AUTO_RUN'),
     source: 'sidepanel',
     payload: {
       totalRuns,
       delayMinutes,
+      intervalSeconds: heroSmsWatchIntervalSeconds,
       autoRunSkipFailures,
       contributionMode: Boolean(latestState?.contributionMode),
       contributionNickname,
@@ -12665,15 +12763,26 @@ inputInbucketHost.addEventListener('blur', () => {
 inputRunCount.addEventListener('input', () => {
   clearPendingAutoRunStartRunCount();
   updateFallbackThreadIntervalInputState();
+  renderHeroSmsWatchStatus();
 });
 inputRunCount.addEventListener('blur', () => {
   if (shouldLockRunCountToEmailPool()) {
     syncRunCountFromConfiguredEmailPool();
     updateFallbackThreadIntervalInputState();
+    renderHeroSmsWatchStatus();
     return;
   }
   inputRunCount.value = String(getRunCountValue());
   updateFallbackThreadIntervalInputState();
+  renderHeroSmsWatchStatus();
+});
+inputHeroSmsWatchEnabled?.addEventListener('change', () => {
+  updateHeroSmsWatchInputState();
+  saveSettings({ silent: true }).catch(() => { });
+});
+inputHeroSmsWatchIntervalSeconds?.addEventListener('blur', () => {
+  inputHeroSmsWatchIntervalSeconds.value = String(normalizeHeroSmsWatchIntervalSeconds(inputHeroSmsWatchIntervalSeconds.value));
+  saveSettings({ silent: true }).catch(() => { });
 });
 
 inputAutoSkipFailures.addEventListener('change', async () => {
@@ -14218,6 +14327,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         heroSmsWatchLastError: message.payload.lastError ?? '',
       });
       syncHeroSmsWatchState(message.payload);
+      renderHeroSmsWatchStatus();
+      applyAutoRunStatus(currentAutoRun);
       updateStatusDisplay(latestState);
       updateButtonStates();
       break;

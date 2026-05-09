@@ -1046,6 +1046,14 @@ function resolveHeroSmsWatchNextBatchSize(completedRuns, effectiveTotalRuns) {
   return completed >= total ? 0 : Math.min(HERO_SMS_WATCH_BATCH_SIZE, total - completed);
 }
 
+function resolveHeroSmsWatchCompletedRuns(stateCompletedRuns, batchCompletedRuns, successfulRuns, effectiveTotalRuns) {
+  const stateCompleted = Math.max(0, Math.floor(Number(stateCompletedRuns) || 0));
+  const batchCompleted = Math.max(0, Math.floor(Number(batchCompletedRuns) || 0));
+  const batchSuccessful = Math.max(0, Math.floor(Number(successfulRuns) || 0));
+  const total = resolveHeroSmsWatchEffectiveTotalRuns(effectiveTotalRuns);
+  return Math.min(total, Math.max(stateCompleted, batchCompleted + batchSuccessful));
+}
+
 function normalizeAutoRunFallbackThreadIntervalMinutes(value) {
   const rawValue = String(value ?? '').trim();
   if (!rawValue) {
@@ -8413,6 +8421,339 @@ async function broadcastHeroSmsWatchStatus(phase, payload = {}, extraState = {})
   }).catch(() => { });
 }
 
+function scheduleHeroSmsWatchPoll(intervalSeconds) {
+  if (heroSmsWatchTimer) {
+    clearTimeout(heroSmsWatchTimer);
+    heroSmsWatchTimer = null;
+  }
+  const delayMs = normalizeHeroSmsWatchIntervalSeconds(intervalSeconds) * 1000;
+  heroSmsWatchTimer = setTimeout(() => {
+    runHeroSmsWatchPollOnce().catch(() => {});
+  }, delayMs);
+  return Date.now() + delayMs;
+}
+
+function normalizeHeroSmsWatchActivation(activation) {
+  return phoneVerificationHelpers?.normalizeActivation?.(activation) || null;
+}
+
+function isCurrentHeroSmsWatchBatchPayload(payload = {}) {
+  if (!payload.options?.heroSmsWatchBatch) {
+    return false;
+  }
+  const payloadSessionId = Number(payload.options?.autoRunSessionId) || 0;
+  return payloadSessionId > 0 && payloadSessionId === heroSmsWatchSessionId;
+}
+
+async function startHeroSmsWatchAutoRun(totalRuns, options = {}) {
+  const state = await getState();
+  if (heroSmsWatchActive || isAutoRunLockedState(state) || isAutoRunPausedState(state) || autoRunActive) {
+    throw new Error('HeroSMS 轮询或自动运行已在进行中，请先停止后再启动。');
+  }
+  if (normalizePhoneSmsProvider(state.phoneSmsProvider) !== PHONE_SMS_PROVIDER_HERO) {
+    throw new Error('HeroSMS 轮询模式要求当前接码平台选择 HeroSMS。');
+  }
+
+  const targetRuns = Math.max(1, Math.floor(Number(totalRuns) || 1));
+  const effectiveTotalRuns = resolveHeroSmsWatchEffectiveTotalRuns(targetRuns);
+  const intervalSeconds = normalizeHeroSmsWatchIntervalSeconds(options.intervalSeconds ?? state.heroSmsWatchIntervalSeconds);
+  heroSmsWatchActive = true;
+  heroSmsWatchSessionId = createAutoRunSessionId();
+  await setPersistentSettings({
+    heroSmsWatchEnabled: true,
+    heroSmsWatchIntervalSeconds: intervalSeconds,
+  });
+  await broadcastHeroSmsWatchStatus('polling', {
+    targetRuns,
+    effectiveTotalRuns,
+    completedRuns: 0,
+    currentBatchRun: 0,
+    nextPollAt: Date.now(),
+  }, {
+    heroSmsWatchEnabled: true,
+    heroSmsWatchIntervalSeconds: intervalSeconds,
+    heroSmsWatchActivation: null,
+    heroSmsWatchLastError: '',
+  });
+  await addLog(`HeroSMS 轮询模式已启动：目标 ${targetRuns} 轮，按 3 次复用向上取整后实际执行 ${effectiveTotalRuns} 轮。`, 'info');
+  runHeroSmsWatchPollOnce().catch(() => {});
+  return { ok: true, effectiveTotalRuns };
+}
+
+async function runHeroSmsWatchPollOnce() {
+  if (!heroSmsWatchActive || heroSmsWatchPollRunning) {
+    return false;
+  }
+  heroSmsWatchPollRunning = true;
+  try {
+    const state = await getState();
+    if (!state.heroSmsWatchEnabled) {
+      heroSmsWatchActive = false;
+      return false;
+    }
+
+    const completedRuns = Math.max(0, Number(state.heroSmsWatchCompletedRuns) || 0);
+    const targetRuns = Math.max(1, Number(state.heroSmsWatchTargetRuns) || 1);
+    const effectiveTotalRuns = resolveHeroSmsWatchEffectiveTotalRuns(state.heroSmsWatchEffectiveTotalRuns || targetRuns);
+    const batchSize = resolveHeroSmsWatchNextBatchSize(completedRuns, effectiveTotalRuns);
+    if (batchSize <= 0) {
+      await stopHeroSmsWatchAutoRun({ logMessage: 'HeroSMS 轮询模式已达到实际执行轮数。' });
+      return true;
+    }
+
+    await broadcastHeroSmsWatchStatus('buying', {
+      targetRuns,
+      effectiveTotalRuns,
+      completedRuns,
+      currentBatchRun: 0,
+      nextPollAt: null,
+      activation: null,
+      lastError: '',
+    });
+    const activation = await prebuyHeroSmsActivationForWatch(state);
+    await addLog(`HeroSMS 轮询模式已购买号码 ${activation.phoneNumber}，开始 3 轮复用批次。`, 'ok');
+    await broadcastHeroSmsWatchStatus('running_batch', {
+      targetRuns,
+      effectiveTotalRuns,
+      completedRuns,
+      currentBatchRun: 0,
+      activation,
+      nextPollAt: null,
+      lastError: '',
+    });
+    startAutoRunLoop(batchSize, {
+      autoRunSessionId: heroSmsWatchSessionId,
+      autoRunSkipFailures: false,
+      mode: 'restart',
+      heroSmsWatchBatch: true,
+      heroSmsWatchBatchCompletedRuns: completedRuns,
+    });
+    return true;
+  } catch (error) {
+    const latestState = await getState();
+    const intervalSeconds = normalizeHeroSmsWatchIntervalSeconds(latestState.heroSmsWatchIntervalSeconds);
+    const nextPollAt = scheduleHeroSmsWatchPoll(intervalSeconds);
+    await broadcastHeroSmsWatchStatus('polling', {
+      targetRuns: latestState.heroSmsWatchTargetRuns,
+      effectiveTotalRuns: latestState.heroSmsWatchEffectiveTotalRuns,
+      completedRuns: latestState.heroSmsWatchCompletedRuns,
+      currentBatchRun: 0,
+      nextPollAt,
+      activation: null,
+      lastError: error?.message || String(error || '未知错误'),
+    });
+    await addLog(`HeroSMS 轮询暂未买到可用号码：${error?.message || String(error || '未知错误')}，${intervalSeconds} 秒后重试。`, 'warn');
+    return false;
+  } finally {
+    heroSmsWatchPollRunning = false;
+  }
+}
+
+async function handleHeroSmsWatchBatchRoundSuccess(payload = {}) {
+  if (!isCurrentHeroSmsWatchBatchPayload(payload)) {
+    return false;
+  }
+  const state = await getState();
+  if (!state.heroSmsWatchEnabled) {
+    return false;
+  }
+
+  const targetRuns = Math.max(1, Number(state.heroSmsWatchTargetRuns) || 1);
+  const effectiveTotalRuns = resolveHeroSmsWatchEffectiveTotalRuns(state.heroSmsWatchEffectiveTotalRuns || targetRuns);
+  const stateCompletedRuns = Math.max(0, Number(state.heroSmsWatchCompletedRuns) || 0);
+  const batchCompletedRuns = Math.max(0, Number(payload.options?.heroSmsWatchBatchCompletedRuns) || 0);
+  const batchSuccessfulRuns = Math.max(1, Number(payload.targetRun) || 1);
+  const completedRuns = resolveHeroSmsWatchCompletedRuns(stateCompletedRuns + 1, batchCompletedRuns, batchSuccessfulRuns, effectiveTotalRuns);
+  const currentBatchRun = Math.min(HERO_SMS_WATCH_BATCH_SIZE, Math.max(0, completedRuns - batchCompletedRuns));
+  const activation = normalizeHeroSmsWatchActivation(state.heroSmsWatchActivation || state.currentPhoneActivation);
+  await broadcastHeroSmsWatchStatus('running_batch', {
+    targetRuns,
+    effectiveTotalRuns,
+    completedRuns,
+    currentBatchRun,
+    activation,
+    nextPollAt: null,
+    lastError: '',
+  });
+  return true;
+}
+
+async function handleHeroSmsWatchBatchFailed(payload = {}) {
+  if (!isCurrentHeroSmsWatchBatchPayload(payload)) {
+    return false;
+  }
+  const state = await getState();
+  if (!state.heroSmsWatchEnabled) {
+    return false;
+  }
+
+  const reason = payload.reason || '批次未完成';
+  const targetRuns = Math.max(1, Number(state.heroSmsWatchTargetRuns) || 1);
+  const effectiveTotalRuns = resolveHeroSmsWatchEffectiveTotalRuns(state.heroSmsWatchEffectiveTotalRuns || targetRuns);
+  const batchCompletedRuns = Math.max(0, Number(payload.options?.heroSmsWatchBatchCompletedRuns) || 0);
+  const successfulRuns = Math.max(0, Number(payload.successfulRuns) || 0);
+  const completedRuns = resolveHeroSmsWatchCompletedRuns(state.heroSmsWatchCompletedRuns, batchCompletedRuns, successfulRuns, effectiveTotalRuns);
+  const intervalSeconds = normalizeHeroSmsWatchIntervalSeconds(state.heroSmsWatchIntervalSeconds);
+  const activation = normalizeHeroSmsWatchActivation(state.heroSmsWatchActivation || state.currentPhoneActivation);
+  if (activation) {
+    await cancelHeroSmsWatchActivation(state, activation).catch((error) => addLog(`HeroSMS 轮询模式释放号码失败：${error.message}`, 'warn'));
+  }
+  await persistHeroSmsWatchCurrentActivation(null).catch(() => {});
+  const nextPollAt = scheduleHeroSmsWatchPoll(intervalSeconds);
+  await broadcastHeroSmsWatchStatus('polling', {
+    targetRuns,
+    effectiveTotalRuns,
+    completedRuns,
+    currentBatchRun: 0,
+    activation: null,
+    nextPollAt,
+    lastError: reason,
+  }, {
+    heroSmsWatchActivation: null,
+  });
+  await addLog(`HeroSMS 轮询模式当前号码批次失败，已放弃号码并恢复轮询：${reason}`, 'warn');
+  return true;
+}
+
+async function handleHeroSmsWatchBatchComplete(payload = {}) {
+  if (!isCurrentHeroSmsWatchBatchPayload(payload)) {
+    return false;
+  }
+  const state = await getState();
+  if (!state.heroSmsWatchEnabled) {
+    return false;
+  }
+
+  const targetRuns = Math.max(1, Number(state.heroSmsWatchTargetRuns) || 1);
+  const effectiveTotalRuns = resolveHeroSmsWatchEffectiveTotalRuns(state.heroSmsWatchEffectiveTotalRuns || targetRuns);
+  const batchCompletedRuns = Math.max(0, Number(payload.options?.heroSmsWatchBatchCompletedRuns) || 0);
+  const successfulRuns = Math.max(0, Number(payload.successfulRuns) || 0);
+  const completedRuns = resolveHeroSmsWatchCompletedRuns(state.heroSmsWatchCompletedRuns, batchCompletedRuns, successfulRuns, effectiveTotalRuns);
+  await persistHeroSmsWatchCurrentActivation(null).catch(() => {});
+  if (completedRuns >= effectiveTotalRuns) {
+    await broadcastHeroSmsWatchStatus('running_batch', {
+      targetRuns,
+      effectiveTotalRuns,
+      completedRuns,
+      currentBatchRun: Math.min(HERO_SMS_WATCH_BATCH_SIZE, Math.max(0, completedRuns - batchCompletedRuns)),
+      activation: null,
+      nextPollAt: null,
+      lastError: '',
+    }, {
+      heroSmsWatchActivation: null,
+    });
+    await stopHeroSmsWatchAutoRun({
+      completedRuns,
+      logMessage: 'HeroSMS 轮询模式已完成全部实际执行轮数。',
+    });
+    return true;
+  }
+
+  const intervalSeconds = normalizeHeroSmsWatchIntervalSeconds(state.heroSmsWatchIntervalSeconds);
+  const nextPollAt = scheduleHeroSmsWatchPoll(intervalSeconds);
+  await broadcastHeroSmsWatchStatus('polling', {
+    targetRuns,
+    effectiveTotalRuns,
+    completedRuns,
+    currentBatchRun: 0,
+    activation: null,
+    nextPollAt,
+    lastError: '',
+  }, {
+    heroSmsWatchActivation: null,
+  });
+  await addLog(`HeroSMS 轮询模式当前号码已完成 ${payload.successfulRuns || HERO_SMS_WATCH_BATCH_SIZE} 轮复用，${intervalSeconds} 秒后继续查号。`, 'ok');
+  return true;
+}
+
+async function stopHeroSmsWatchAutoRun(options = {}) {
+  heroSmsWatchActive = false;
+  heroSmsWatchSessionId = createAutoRunSessionId();
+  if (heroSmsWatchTimer) {
+    clearTimeout(heroSmsWatchTimer);
+    heroSmsWatchTimer = null;
+  }
+  const state = await getState();
+  const activation = normalizeHeroSmsWatchActivation(state.heroSmsWatchActivation || state.currentPhoneActivation);
+  if (activation && options.cancelActivation && !options.preserveActivation) {
+    await cancelHeroSmsWatchActivation(state, activation).catch((error) => addLog(`HeroSMS 轮询模式释放号码失败：${error.message}`, 'warn'));
+  }
+  if (!options.preserveActivation) {
+    await persistHeroSmsWatchCurrentActivation(null).catch(() => {});
+  }
+  await setPersistentSettings({ heroSmsWatchEnabled: false });
+  await broadcastHeroSmsWatchStatus('idle', {
+    targetRuns: state.heroSmsWatchTargetRuns,
+    effectiveTotalRuns: state.heroSmsWatchEffectiveTotalRuns,
+    completedRuns: options.completedRuns ?? state.heroSmsWatchCompletedRuns,
+    currentBatchRun: 0,
+    nextPollAt: null,
+    activation: options.preserveActivation ? activation : null,
+    lastError: '',
+  }, {
+    heroSmsWatchEnabled: false,
+    heroSmsWatchActivation: options.preserveActivation ? activation : null,
+  });
+  if (options.logMessage !== false) {
+    await addLog(options.logMessage || 'HeroSMS 轮询模式已停止。', 'warn');
+  }
+  return { ok: true };
+}
+
+async function restoreHeroSmsWatchIfNeeded() {
+  const state = await getState();
+  if (!state.heroSmsWatchEnabled) {
+    heroSmsWatchActive = false;
+    return false;
+  }
+
+  heroSmsWatchActive = true;
+  heroSmsWatchSessionId = createAutoRunSessionId();
+  const targetRuns = Math.max(1, Number(state.heroSmsWatchTargetRuns) || 1);
+  const effectiveTotalRuns = resolveHeroSmsWatchEffectiveTotalRuns(state.heroSmsWatchEffectiveTotalRuns || targetRuns);
+  const completedRuns = Math.max(0, Number(state.heroSmsWatchCompletedRuns) || 0);
+  if (completedRuns >= effectiveTotalRuns) {
+    await stopHeroSmsWatchAutoRun({ logMessage: 'HeroSMS 轮询模式恢复时检测到已完成全部轮数。' });
+    return true;
+  }
+
+  if (state.heroSmsWatchPhase === 'running_batch' || state.heroSmsWatchPhase === 'buying') {
+    await handleHeroSmsWatchBatchFailed({
+      options: {
+        autoRunSessionId: heroSmsWatchSessionId,
+        heroSmsWatchBatch: true,
+      },
+      reason: '后台已重新启动，当前号码批次状态已丢失',
+    });
+    return true;
+  }
+
+  const intervalSeconds = normalizeHeroSmsWatchIntervalSeconds(state.heroSmsWatchIntervalSeconds);
+  const savedNextPollAt = Number(state.heroSmsWatchNextPollAt) || 0;
+  const nextPollAt = savedNextPollAt > Date.now()
+    ? savedNextPollAt
+    : Date.now() + intervalSeconds * 1000;
+  if (heroSmsWatchTimer) {
+    clearTimeout(heroSmsWatchTimer);
+  }
+  heroSmsWatchTimer = setTimeout(() => {
+    runHeroSmsWatchPollOnce().catch(() => {});
+  }, Math.max(0, nextPollAt - Date.now()));
+  await broadcastHeroSmsWatchStatus('polling', {
+    targetRuns,
+    effectiveTotalRuns,
+    completedRuns,
+    currentBatchRun: 0,
+    activation: null,
+    nextPollAt,
+    lastError: state.heroSmsWatchLastError || '',
+  }, {
+    heroSmsWatchActivation: null,
+  });
+  await addLog('HeroSMS 轮询模式已恢复。', 'info');
+  return true;
+}
+
 function isAutoRunLockedState(state) {
   return Boolean(state.autoRunning)
     && (
@@ -10021,6 +10362,10 @@ let autoRunTotalRuns = 1;
 let autoRunAttemptRun = 0;
 let autoRunSessionId = 0;
 let autoRunSessionSeed = 0;
+let heroSmsWatchActive = false;
+let heroSmsWatchTimer = null;
+let heroSmsWatchPollRunning = false;
+let heroSmsWatchSessionId = 0;
 let ipProxyAutoSyncRunning = false;
 const EMAIL_FETCH_MAX_ATTEMPTS = 5;
 const VERIFICATION_POLL_MAX_ROUNDS = 5;
@@ -10447,7 +10792,12 @@ const autoRunController = self.MultiPageBackgroundAutoRunController?.createAutoR
   isStopError,
   launchAutoRunTimerPlan,
   normalizeAutoRunFallbackThreadIntervalMinutes,
-  onAutoRunRoundSuccess: (payload = {}) => maybeSwitchIpProxyAfterAutoRunRoundSuccess(payload),
+  onAutoRunRoundSuccess: async (payload = {}) => {
+    await maybeSwitchIpProxyAfterAutoRunRoundSuccess(payload);
+    await handleHeroSmsWatchBatchRoundSuccess(payload);
+  },
+  onHeroSmsWatchBatchComplete: (payload = {}) => handleHeroSmsWatchBatchComplete(payload),
+  onHeroSmsWatchBatchFailed: (payload = {}) => handleHeroSmsWatchBatchFailed(payload),
   persistAutoRunTimerPlan,
   resetState,
   runAutoSequenceFromStep: (...args) => runAutoSequenceFromStep(...args),
@@ -11785,6 +12135,8 @@ const messageRouter = self.MultiPageBackgroundMessageRouter?.createMessageRouter
   skipStep,
   startContributionFlow: (...args) => contributionOAuthManager?.startContributionFlow?.(...args),
   startAutoRunLoop,
+  startHeroSmsWatchAutoRun,
+  stopHeroSmsWatchAutoRun,
   pollContributionStatus: (...args) => contributionOAuthManager?.pollContributionStatus?.(...args),
   syncHotmailAccounts,
   syncPayPalAccounts,
@@ -13405,6 +13757,9 @@ chrome.runtime.onStartup.addListener(() => {
   restoreAutoRunTimerIfNeeded().catch((err) => {
     console.error(LOG_PREFIX, 'Failed to restore auto run timer on startup:', err);
   });
+  restoreHeroSmsWatchIfNeeded().catch((err) => {
+    console.error(LOG_PREFIX, 'Failed to restore HeroSMS watch mode on startup:', err);
+  });
   if (IP_PROXY_INIT_AUTO_APPLY) {
     ensureIpProxySettingsAppliedFromCurrentState({
       skipExitProbe: !IP_PROXY_INIT_ENABLE_EXIT_PROBE,
@@ -13422,6 +13777,9 @@ chrome.runtime.onInstalled.addListener(() => {
   restoreAutoRunTimerIfNeeded().catch((err) => {
     console.error(LOG_PREFIX, 'Failed to restore auto run timer on install/update:', err);
   });
+  restoreHeroSmsWatchIfNeeded().catch((err) => {
+    console.error(LOG_PREFIX, 'Failed to restore HeroSMS watch mode on install/update:', err);
+  });
   if (IP_PROXY_INIT_AUTO_APPLY) {
     ensureIpProxySettingsAppliedFromCurrentState({
       skipExitProbe: !IP_PROXY_INIT_ENABLE_EXIT_PROBE,
@@ -13437,6 +13795,9 @@ chrome.runtime.onInstalled.addListener(() => {
 
 restoreAutoRunTimerIfNeeded().catch((err) => {
   console.error(LOG_PREFIX, 'Failed to restore auto run timer:', err);
+});
+restoreHeroSmsWatchIfNeeded().catch((err) => {
+  console.error(LOG_PREFIX, 'Failed to restore HeroSMS watch mode:', err);
 });
 if (IP_PROXY_INIT_AUTO_APPLY) {
   ensureIpProxySettingsAppliedFromCurrentState({

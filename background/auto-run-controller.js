@@ -32,6 +32,9 @@
       isStopError,
       launchAutoRunTimerPlan,
       normalizeAutoRunFallbackThreadIntervalMinutes,
+      onAutoRunRoundSuccess,
+      onHeroSmsWatchBatchComplete,
+      onHeroSmsWatchBatchFailed,
       persistAutoRunTimerPlan,
       resetState,
       runAutoSequenceFromStep,
@@ -190,26 +193,6 @@
         .join('；');
     }
 
-    function isPhoneNumberSupplyExhaustedFailure(errorLike) {
-      const message = String(
-        typeof errorLike === 'string'
-          ? errorLike
-          : (errorLike?.message || errorLike || '')
-      ).trim();
-      if (!message) {
-        return false;
-      }
-      const hasGlobalNoSupplySignal = /Step\s*9:\s*all\s+provider\s+candidates\s+failed\s+to\s+acquire\s+number|(?:HeroSMS|5sim|NexSMS)\s+no\s+numbers\s+available\s+across|no\s+numbers\s+within\s+maxPrice|no\s+free\s+phones|numbers?\s+not\s+found/i.test(message);
-      if (!hasGlobalNoSupplySignal) {
-        return false;
-      }
-      const hasRecoverableStep9RotationSignal = /phone\s+verification\s+did\s+not\s+succeed\s+after\s+\d+\s+number\s+replacements|sms_timeout_after_|route_405_retry_loop|resend_throttled|activation_not_found|order\s+not\s+found/i.test(message);
-      if (hasRecoverableStep9RotationSignal) {
-        return false;
-      }
-      return true;
-    }
-
     function shouldKeepCustomMailProviderPoolEmail(state = {}) {
       return String(state?.mailProvider || '').trim().toLowerCase() === 'custom'
         && Array.isArray(state?.customMailProviderPool)
@@ -225,7 +208,11 @@
       if (!text) {
         return false;
       }
-      return /no\s+numbers\s+available\s+across|all provider candidates failed to acquire number|no\s+free\s+phones|numbers?\s+not\s+found|no\s+numbers\s+within\s+maxprice|countries\s+are\s+empty|均无可用号码|暂无可用号码|无可用号码|接码号池暂无|\bNO_NUMBERS\b/i.test(text);
+      const hasGlobalNoSupplySignal = /Step\s*9:\s*all\s+provider\s+candidates\s+failed\s+to\s+acquire\s+number|(?:HeroSMS|5sim|NexSMS)\s+no\s+numbers\s+available\s+across|no\s+numbers\s+within\s+maxprice|no\s+free\s+phones|numbers?\s+not\s+found|countries\s+are\s+empty|均无可用号码|暂无可用号码|无可用号码|接码号池暂无|\bNO_NUMBERS\b/i.test(text);
+      if (!hasGlobalNoSupplySignal) {
+        return false;
+      }
+      return !/phone\s+verification\s+did\s+not\s+succeed\s+after\s+\d+\s+number\s+replacements|sms_timeout_after_|route_405_retry_loop|resend_throttled|activation_not_found|order\s+not\s+found/i.test(text);
     }
 
     async function logAutoRunFinalSummary(totalRuns, roundSummaries = []) {
@@ -521,6 +508,17 @@
               cloudflareDomain: prevState.cloudflareDomain,
               cloudflareDomains: prevState.cloudflareDomains,
               reusablePhoneActivation: prevState.reusablePhoneActivation,
+              currentPhoneActivation: prevState.currentPhoneActivation,
+              heroSmsWatchEnabled: prevState.heroSmsWatchEnabled,
+              heroSmsWatchIntervalSeconds: prevState.heroSmsWatchIntervalSeconds,
+              heroSmsWatchPhase: prevState.heroSmsWatchPhase,
+              heroSmsWatchTargetRuns: prevState.heroSmsWatchTargetRuns,
+              heroSmsWatchEffectiveTotalRuns: prevState.heroSmsWatchEffectiveTotalRuns,
+              heroSmsWatchCompletedRuns: prevState.heroSmsWatchCompletedRuns,
+              heroSmsWatchCurrentBatchRun: prevState.heroSmsWatchCurrentBatchRun,
+              heroSmsWatchActivation: prevState.heroSmsWatchActivation,
+              heroSmsWatchLastError: prevState.heroSmsWatchLastError,
+              heroSmsWatchNextPollAt: prevState.heroSmsWatchNextPollAt,
               autoRunRoundSummaries: serializeAutoRunRoundSummaries(totalRuns, roundSummaries),
               autoRunSessionId: sessionId,
               tabRegistry: {},
@@ -593,6 +591,20 @@
             await setState({
               autoRunRoundSummaries: serializeAutoRunRoundSummaries(totalRuns, roundSummaries),
             });
+            if (typeof onAutoRunRoundSuccess === 'function') {
+              try {
+                await onAutoRunRoundSuccess({
+                  targetRun,
+                  totalRuns,
+                  attemptRun,
+                  sessionId,
+                  roundSummary,
+                  options,
+                });
+              } catch (callbackError) {
+                await addLog(`自动运行轮次成功回调失败：${getErrorMessage(callbackError)}`, 'warn');
+              }
+            }
             await addLog(`=== 第 ${targetRun}/${totalRuns} 轮完成（第 ${attemptRun} 次尝试成功）===`, 'ok');
             break;
           } catch (err) {
@@ -994,6 +1006,30 @@
         autoRunRoundSummaries: serializeAutoRunRoundSummaries(totalRuns, roundSummaries),
       });
       await logAutoRunFinalSummary(totalRuns, roundSummaries);
+
+      if (options.heroSmsWatchBatch) {
+        const failedRound = roundSummaries.find((item) => item.status === 'failed');
+        const callbackPayload = {
+          totalRuns,
+          successfulRuns,
+          roundSummaries,
+          sessionId,
+          options,
+        };
+        try {
+          if (failedRound || deps.getStopRequested() || stoppedEarly) {
+            await onHeroSmsWatchBatchFailed?.({
+              ...callbackPayload,
+              failedRound,
+              reason: failedRound?.finalFailureReason || failedRound?.failureReasons?.[failedRound.failureReasons.length - 1] || '批次未完成',
+            });
+          } else {
+            await onHeroSmsWatchBatchComplete?.(callbackPayload);
+          }
+        } catch (callbackError) {
+          await addLog(`HeroSMS 轮询批次回调失败：${getErrorMessage(callbackError)}`, 'warn');
+        }
+      }
 
       const finalRuntime = runtime.get();
       if (deps.getStopRequested() || stoppedEarly) {
