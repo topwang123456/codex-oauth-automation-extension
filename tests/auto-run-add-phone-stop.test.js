@@ -611,7 +611,7 @@ test('auto-run controller keeps same-round retrying for step9 local replacement 
     runAutoSequenceFromStep: async () => {
       events.runCalls += 1;
       if (events.runCalls === 1) {
-        throw new Error('Step 9: phone verification did not succeed after 3 number replacements. Last reason: sms_timeout_after_2_windows.');
+        throw new Error('Step 9: phone verification did not succeed after 3 number replacements. Last reason: no free phones.');
       }
     },
     runtime,

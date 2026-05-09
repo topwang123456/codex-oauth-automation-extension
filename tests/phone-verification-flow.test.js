@@ -83,6 +83,54 @@ test('phone verification helper requests HeroSMS numbers with fixed OpenAI and T
   assert.equal(requests[1].searchParams.get('api_key'), 'demo-key');
 });
 
+test('HeroSMS watch prebuy only tries one acquire round before outer polling resumes', async () => {
+  const requests = [];
+  const sleeps = [];
+  const logs = [];
+  const helpers = api.createPhoneVerificationHelpers({
+    addLog: async (message, level) => logs.push({ message, level }),
+    ensureStep8SignupPageReady: async () => {},
+    fetchImpl: async (url) => {
+      const parsedUrl = new URL(url);
+      requests.push(parsedUrl);
+      const action = parsedUrl.searchParams.get('action');
+      if (action === 'getPrices') {
+        return {
+          ok: true,
+          text: async () => buildHeroSmsPricesPayload(),
+        };
+      }
+      if (action === 'getNumber' || action === 'getNumberV2') {
+        return {
+          ok: true,
+          text: async () => 'NO_NUMBERS',
+        };
+      }
+      throw new Error(`Unexpected HeroSMS action: ${action}`);
+    },
+    getState: async () => ({ heroSmsApiKey: 'demo-key' }),
+    sendToContentScriptResilient: async () => ({}),
+    setState: async () => {},
+    sleepWithStop: async (ms) => sleeps.push(ms),
+    throwIfStopped: () => {},
+  });
+
+  await assert.rejects(
+    helpers.prebuyHeroSmsActivationForWatch({
+      heroSmsApiKey: 'demo-key',
+      heroSmsActivationRetryRounds: 3,
+    }),
+    /HeroSMS 已尝试 1 个候选国家，均无可用号码/
+  );
+
+  const activationActions = requests
+    .map((requestUrl) => requestUrl.searchParams.get('action'))
+    .filter((action) => action === 'getNumber' || action === 'getNumberV2');
+  assert.deepStrictEqual(activationActions, ['getNumber', 'getNumberV2']);
+  assert.deepStrictEqual(sleeps, []);
+  assert.equal(logs.some((entry) => String(entry.message || '').includes('第 1/3 轮')), false);
+});
+
 test('signup phone helper persists signup runtime state without touching add-phone activation', async () => {
   const setStateCalls = [];
   let currentState = {
@@ -902,8 +950,8 @@ test('phone verification helper retries acquisition rounds when at least one cou
     true
   );
   assert.equal(
-    logs.some((entry) => String(entry.message || '').includes('HeroSMS 暂无可用号码（第 1/2 轮）')),
-    true
+    logs.filter((entry) => String(entry.message || '').includes('HeroSMS 暂无可用号码（第 1/2 轮）')).length,
+    1
   );
 });
 

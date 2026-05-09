@@ -622,6 +622,28 @@
           </div>
         </div>
       </div>
+      <div class="data-row" id="row-hero-sms-watch-mode">
+        <span class="data-label">HeroSMS轮询</span>
+        <div class="data-inline setting-pair">
+          <div class="setting-group setting-group-primary">
+            <label class="toggle-switch" for="input-hero-sms-watch-enabled" title="开启后自动按钮会先轮询 HeroSMS 买号，买到后每个号码复用 3 轮">
+              <input type="checkbox" id="input-hero-sms-watch-enabled" />
+              <span class="toggle-switch-track" aria-hidden="true">
+                <span class="toggle-switch-thumb"></span>
+              </span>
+              <span>启用</span>
+            </label>
+          </div>
+          <div class="setting-group setting-group-secondary">
+            <span class="setting-caption">查号间隔</span>
+            <div class="setting-controls">
+              <input type="number" id="input-hero-sms-watch-interval-seconds" class="data-input auto-delay-input" value="30" min="5" max="3600" step="1" title="无号或批次结束后的下一次查号间隔" />
+              <span class="data-unit">秒</span>
+            </div>
+          </div>
+          <span id="display-hero-sms-watch-effective-runs" class="setting-caption">实际 3 轮起</span>
+        </div>
+      </div>
       <div class="data-row module-divider-start" id="row-oauth-display">
         <span class="data-label">OAuth</span>
         <span id="display-oauth-url" class="data-value mono truncate">等待中...</span>

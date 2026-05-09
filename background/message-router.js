@@ -119,6 +119,8 @@
       skipStep,
       startContributionFlow,
       startAutoRunLoop,
+      startHeroSmsWatchAutoRun,
+      stopHeroSmsWatchAutoRun,
       deleteMail2925Account,
       deleteMail2925Accounts,
       syncHotmailAccounts,
@@ -815,6 +817,27 @@
             await executeStep(step);
           }
           return { ok: true };
+        }
+
+        case 'START_HERO_SMS_WATCH_AUTO_RUN': {
+          clearStopRequest();
+          if (typeof startHeroSmsWatchAutoRun !== 'function') {
+            throw new Error('HeroSMS 轮询自动运行能力尚未接入。');
+          }
+          const totalRuns = normalizeRunCount(message.payload?.totalRuns || 1);
+          return await startHeroSmsWatchAutoRun(totalRuns, {
+            intervalSeconds: message.payload?.intervalSeconds,
+          });
+        }
+
+        case 'STOP_HERO_SMS_WATCH_AUTO_RUN': {
+          if (typeof stopHeroSmsWatchAutoRun !== 'function') {
+            throw new Error('HeroSMS 轮询自动运行能力尚未接入。');
+          }
+          if (typeof requestStop === 'function') {
+            await requestStop({ logMessage: '已收到 HeroSMS 轮询停止请求，正在取消当前批次...' });
+          }
+          return await stopHeroSmsWatchAutoRun({ preserveActivation: true });
         }
 
         case 'AUTO_RUN': {

@@ -3085,7 +3085,10 @@
       const configuredAcquireRounds = normalizePhoneActivationRetryRounds(
         state?.heroSmsActivationRetryRounds
       );
-      const maxAcquireRounds = Math.max(2, configuredAcquireRounds);
+      const optionAcquireRounds = Math.floor(Number(options?.maxAcquireRounds));
+      const maxAcquireRounds = Number.isFinite(optionAcquireRounds) && optionAcquireRounds > 0
+        ? Math.min(PHONE_ACTIVATION_RETRY_ROUNDS_MAX, optionAcquireRounds)
+        : Math.max(2, configuredAcquireRounds);
       const retryDelayMs = normalizePhoneActivationRetryDelayMs(
         state?.heroSmsActivationRetryDelayMs
       );
@@ -3319,10 +3322,6 @@
         ) {
           await addLog(
             `步骤 9：HeroSMS 暂无可用号码（第 ${round}/${maxAcquireRounds} 轮）；${Math.ceil(retryDelayMs / 1000)} 秒后重试。国家：${retryableNoNumberCountries.join(', ')}。`,
-            'warn'
-          );
-          await addLog(
-            `步骤 9：HeroSMS 暂无可用号码（第 ${round}/${maxAcquireRounds} 轮），${Math.ceil(retryDelayMs / 1000)} 秒后重试。国家：${retryableNoNumberCountries.join(', ')}。`,
             'warn'
           );
           await sleepWithStop(retryDelayMs);
@@ -4260,6 +4259,8 @@
         ...state,
         phoneSmsProvider: PHONE_SMS_PROVIDER_HERO,
         heroSmsReuseEnabled: true,
+      }, {
+        maxAcquireRounds: 1,
       });
       const normalizedActivation = normalizeActivation({
         ...activation,
