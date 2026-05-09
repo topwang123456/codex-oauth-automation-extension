@@ -262,6 +262,17 @@ const btnTempEmailDomainMode = document.getElementById('btn-temp-email-domain-mo
 const cloudflareTempEmailSection = document.getElementById('cloudflare-temp-email-section');
 const btnCloudflareTempEmailUsageGuide = document.getElementById('btn-cloudflare-temp-email-usage-guide');
 const btnCloudflareTempEmailGithub = document.getElementById('btn-cloudflare-temp-email-github');
+const cloudMailSection = document.getElementById('cloud-mail-section');
+const rowCloudMailBaseUrl = document.getElementById('row-cloud-mail-base-url');
+const rowCloudMailAdminEmail = document.getElementById('row-cloud-mail-admin-email');
+const rowCloudMailAdminPassword = document.getElementById('row-cloud-mail-admin-password');
+const rowCloudMailReceiveMailbox = document.getElementById('row-cloud-mail-receive-mailbox');
+const rowCloudMailDomain = document.getElementById('row-cloud-mail-domain');
+const inputCloudMailBaseUrl = document.getElementById('input-cloud-mail-base-url');
+const inputCloudMailAdminEmail = document.getElementById('input-cloud-mail-admin-email');
+const inputCloudMailAdminPassword = document.getElementById('input-cloud-mail-admin-password');
+const inputCloudMailReceiveMailbox = document.getElementById('input-cloud-mail-receive-mailbox');
+const inputCloudMailDomain = document.getElementById('input-cloud-mail-domain');
 const hotmailSection = document.getElementById('hotmail-section');
 const mail2925Section = document.getElementById('mail2925-section');
 const luckmailSection = document.getElementById('luckmail-section');
@@ -2640,6 +2651,18 @@ function normalizeCloudflareTempEmailDomains(values = []) {
   return domains;
 }
 
+function normalizeCloudMailBaseUrlValue(value = '') {
+  return normalizeCloudflareTempEmailBaseUrlValue(value);
+}
+
+function normalizeCloudMailReceiveMailboxValue(value = '') {
+  return normalizeCloudflareTempEmailReceiveMailboxValue(value);
+}
+
+function normalizeCloudMailDomainValue(value = '') {
+  return normalizeCloudflareDomainValue(value);
+}
+
 function getCloudflareDomainsFromState() {
   const domains = normalizeCloudflareDomains(latestState?.cloudflareDomains || []);
   const activeDomain = normalizeCloudflareDomainValue(latestState?.cloudflareDomain || '');
@@ -2716,6 +2739,24 @@ function applyCloudflareTempEmailSettingsState(state = {}) {
   setCloudflareTempEmailDomainEditMode(false, { clearInput: true });
 }
 
+function applyCloudMailSettingsState(state = {}) {
+  if (inputCloudMailBaseUrl) {
+    inputCloudMailBaseUrl.value = state?.cloudMailBaseUrl || '';
+  }
+  if (inputCloudMailAdminEmail) {
+    inputCloudMailAdminEmail.value = state?.cloudMailAdminEmail || '';
+  }
+  if (inputCloudMailAdminPassword) {
+    inputCloudMailAdminPassword.value = state?.cloudMailAdminPassword || '';
+  }
+  if (inputCloudMailReceiveMailbox) {
+    inputCloudMailReceiveMailbox.value = state?.cloudMailReceiveMailbox || '';
+  }
+  if (inputCloudMailDomain) {
+    inputCloudMailDomain.value = state?.cloudMailDomain || '';
+  }
+}
+
 function collectSettingsPayload() {
   const defaultGpcHelperApiUrl = typeof DEFAULT_GPC_HELPER_API_URL !== 'undefined'
     ? DEFAULT_GPC_HELPER_API_URL
@@ -2728,6 +2769,15 @@ function collectSettingsPayload() {
   const selectedCloudflareTempEmailDomain = normalizeCloudflareTempEmailDomainValue(
     !cloudflareTempEmailDomainEditMode ? selectTempEmailDomain.value : tempEmailActiveDomain
   ) || tempEmailActiveDomain;
+  const normalizeCloudMailBaseUrlInput = typeof normalizeCloudMailBaseUrlValue === 'function'
+    ? normalizeCloudMailBaseUrlValue
+    : normalizeCloudflareTempEmailBaseUrlValue;
+  const normalizeCloudMailReceiveMailboxInput = typeof normalizeCloudMailReceiveMailboxValue === 'function'
+    ? normalizeCloudMailReceiveMailboxValue
+    : normalizeCloudflareTempEmailReceiveMailboxValue;
+  const normalizeCloudMailDomainInput = typeof normalizeCloudMailDomainValue === 'function'
+    ? normalizeCloudMailDomainValue
+    : normalizeCloudflareTempEmailDomainValue;
   const contributionModeEnabled = Boolean(latestState?.contributionMode);
   const icloudFetchModeRawValue = typeof selectIcloudFetchMode !== 'undefined'
     ? String(selectIcloudFetchMode?.value || '')
@@ -3378,6 +3428,11 @@ function collectSettingsPayload() {
     cloudflareTempEmailUseRandomSubdomain: Boolean(inputTempEmailUseRandomSubdomain?.checked),
     cloudflareTempEmailDomain: selectedCloudflareTempEmailDomain,
     cloudflareTempEmailDomains: tempEmailDomains,
+    cloudMailBaseUrl: normalizeCloudMailBaseUrlInput((typeof inputCloudMailBaseUrl !== 'undefined' && inputCloudMailBaseUrl) ? inputCloudMailBaseUrl.value : ''),
+    cloudMailAdminEmail: ((typeof inputCloudMailAdminEmail !== 'undefined' && inputCloudMailAdminEmail) ? inputCloudMailAdminEmail.value : '').trim(),
+    cloudMailAdminPassword: (typeof inputCloudMailAdminPassword !== 'undefined' && inputCloudMailAdminPassword) ? inputCloudMailAdminPassword.value : '',
+    cloudMailReceiveMailbox: normalizeCloudMailReceiveMailboxInput((typeof inputCloudMailReceiveMailbox !== 'undefined' && inputCloudMailReceiveMailbox) ? inputCloudMailReceiveMailbox.value : ''),
+    cloudMailDomain: normalizeCloudMailDomainInput((typeof inputCloudMailDomain !== 'undefined' && inputCloudMailDomain) ? inputCloudMailDomain.value : ''),
     autoRunSkipFailures: inputAutoSkipFailures.checked,
     autoRunFallbackThreadIntervalMinutes: normalizeAutoRunThreadIntervalMinutes(inputAutoSkipFailuresThreadIntervalMinutes.value),
     step6CookieCleanupEnabled: typeof inputStep6CookieCleanupEnabled !== 'undefined' && inputStep6CookieCleanupEnabled
@@ -8114,7 +8169,7 @@ function applySettingsState(state) {
   inputCodex2ApiUrl.value = state?.codex2apiUrl || '';
   inputCodex2ApiAdminKey.value = state?.codex2apiAdminKey || '';
   const restoredMailProvider = isCustomMailProvider(state?.mailProvider)
-    || [ICLOUD_PROVIDER, 'hotmail-api', GMAIL_PROVIDER, 'luckmail-api', '163', '163-vip', '126', 'qq', 'inbucket', '2925', 'cloudflare-temp-email'].includes(String(state?.mailProvider || '').trim())
+    || [ICLOUD_PROVIDER, 'hotmail-api', GMAIL_PROVIDER, 'luckmail-api', '163', '163-vip', '126', 'qq', 'inbucket', '2925', 'cloudflare-temp-email', 'cloudmail'].includes(String(state?.mailProvider || '').trim())
     ? String(state?.mailProvider || '163').trim()
     : (String(state?.emailGenerator || '').trim().toLowerCase() === 'custom'
       || String(state?.emailGenerator || '').trim().toLowerCase() === 'manual'
@@ -8136,6 +8191,8 @@ function applySettingsState(state) {
       selectEmailGenerator.value = 'cloudflare';
     } else if (restoredEmailGenerator === 'cloudflare-temp-email') {
       selectEmailGenerator.value = 'cloudflare-temp-email';
+    } else if (restoredEmailGenerator === 'cloudmail') {
+      selectEmailGenerator.value = 'cloudmail';
     } else {
       selectEmailGenerator.value = 'duck';
     }
@@ -8191,6 +8248,9 @@ function applySettingsState(state) {
   selectLuckmailEmailType.value = normalizeLuckmailEmailType(state?.luckmailEmailType);
   inputLuckmailDomain.value = state?.luckmailDomain || '';
   applyCloudflareTempEmailSettingsState(state);
+  if (typeof applyCloudMailSettingsState === 'function') {
+    applyCloudMailSettingsState(state);
+  }
   renderCloudflareDomainOptions(state?.cloudflareDomain || '');
   setCloudflareDomainEditMode(false, { clearInput: true });
   inputAutoSkipFailures.checked = Boolean(state?.autoRunSkipFailures);
@@ -8937,6 +8997,7 @@ function getSelectedEmailGenerator() {
   }
   if (generator === 'cloudflare') return 'cloudflare';
   if (generator === 'cloudflare-temp-email') return 'cloudflare-temp-email';
+  if (generator === 'cloudmail') return 'cloudmail';
   return 'duck';
 }
 
@@ -8982,6 +9043,14 @@ function getEmailGeneratorUiCopy() {
       placeholder: '点击生成 Cloudflare Temp Email，或手动粘贴邮箱',
       successVerb: '生成',
       label: 'Cloudflare Temp Email',
+    };
+  }
+  if (getSelectedEmailGenerator() === 'cloudmail') {
+    return {
+      buttonLabel: '生成',
+      placeholder: '点击生成 Cloud Mail 邮箱，或手动粘贴邮箱',
+      successVerb: '生成',
+      label: 'Cloud Mail',
     };
   }
 
@@ -9383,6 +9452,7 @@ function updateMailProviderUI() {
   const useIcloudProvider = isIcloudMailProvider();
   const useEmailGenerator = !useHotmail && !useLuckmail && !useCustomEmail && (!useGeneratedAlias || useGmail);
   const useCloudflareTempEmailProvider = selectMailProvider.value === 'cloudflare-temp-email';
+  const useCloudMailProvider = selectMailProvider.value === 'cloudmail';
   const aliasUiCopy = useGeneratedAlias
     ? getManagedAliasProviderUiCopy(selectMailProvider.value, mail2925Mode)
     : null;
@@ -9405,9 +9475,13 @@ function updateMailProviderUI() {
   const useCloudflare = selectedGenerator === 'cloudflare';
   const useIcloud = selectedGenerator === 'icloud';
   const useCloudflareTempEmailGenerator = selectedGenerator === 'cloudflare-temp-email';
+  const useCloudMailGenerator = selectedGenerator === 'cloudmail';
   const showCloudflareDomain = useEmailGenerator && useCloudflare;
   const showCloudflareTempEmailSettings = useCloudflareTempEmailProvider || (useEmailGenerator && useCloudflareTempEmailGenerator);
   const showCloudflareTempEmailReceiveMailbox = useCloudflareTempEmailProvider && !useCloudflareTempEmailGenerator;
+  const showCloudMailSettings = useCloudMailProvider || (useEmailGenerator && useCloudMailGenerator);
+  const showCloudMailReceiveMailbox = useCloudMailProvider && !useCloudMailGenerator;
+  const showCloudMailDomain = useEmailGenerator && useCloudMailGenerator;
   const selectedIcloudHost = typeof getSelectedIcloudHostPreference === 'function'
     ? getSelectedIcloudHostPreference()
     : (normalizeIcloudHostValue(icloudHostPreferenceValue || latestState?.icloudHostPreference || '')
@@ -9433,6 +9507,14 @@ function updateMailProviderUI() {
   if (cloudflareTempEmailSection) {
     cloudflareTempEmailSection.style.display = showCloudflareTempEmailSettings ? '' : 'none';
   }
+  if (typeof cloudMailSection !== 'undefined' && cloudMailSection) {
+    cloudMailSection.style.display = showCloudMailSettings ? '' : 'none';
+  }
+  if (typeof rowCloudMailBaseUrl !== 'undefined' && rowCloudMailBaseUrl) rowCloudMailBaseUrl.style.display = showCloudMailSettings ? '' : 'none';
+  if (typeof rowCloudMailAdminEmail !== 'undefined' && rowCloudMailAdminEmail) rowCloudMailAdminEmail.style.display = showCloudMailSettings ? '' : 'none';
+  if (typeof rowCloudMailAdminPassword !== 'undefined' && rowCloudMailAdminPassword) rowCloudMailAdminPassword.style.display = showCloudMailSettings ? '' : 'none';
+  if (typeof rowCloudMailReceiveMailbox !== 'undefined' && rowCloudMailReceiveMailbox) rowCloudMailReceiveMailbox.style.display = showCloudMailReceiveMailbox ? '' : 'none';
+  if (typeof rowCloudMailDomain !== 'undefined' && rowCloudMailDomain) rowCloudMailDomain.style.display = showCloudMailDomain ? '' : 'none';
   if (icloudSection) {
     const showIcloudSection = (useEmailGenerator && useIcloud) || useIcloudProvider;
     icloudSection.style.display = showIcloudSection ? '' : 'none';
@@ -13311,6 +13393,21 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         || message.payload.cloudflareTempEmailDomains !== undefined
       ) {
         updateMailProviderUI();
+      }
+      if (message.payload.cloudMailBaseUrl !== undefined && inputCloudMailBaseUrl) {
+        inputCloudMailBaseUrl.value = message.payload.cloudMailBaseUrl || '';
+      }
+      if (message.payload.cloudMailAdminEmail !== undefined && inputCloudMailAdminEmail) {
+        inputCloudMailAdminEmail.value = message.payload.cloudMailAdminEmail || '';
+      }
+      if (message.payload.cloudMailAdminPassword !== undefined && inputCloudMailAdminPassword) {
+        inputCloudMailAdminPassword.value = message.payload.cloudMailAdminPassword || '';
+      }
+      if (message.payload.cloudMailReceiveMailbox !== undefined && inputCloudMailReceiveMailbox) {
+        inputCloudMailReceiveMailbox.value = message.payload.cloudMailReceiveMailbox || '';
+      }
+      if (message.payload.cloudMailDomain !== undefined && inputCloudMailDomain) {
+        inputCloudMailDomain.value = message.payload.cloudMailDomain || '';
       }
       if (message.payload.plusModeEnabled !== undefined && inputPlusModeEnabled) {
         inputPlusModeEnabled.checked = Boolean(message.payload.plusModeEnabled);

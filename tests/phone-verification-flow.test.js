@@ -3569,6 +3569,238 @@ test('phone verification helper gives automatic free reuse priority over paid re
   assert.equal(currentState.reusablePhoneActivation.activationId, 'paid-reuse');
 });
 
+test('phone verification helper hands off manual-only free reuse even when automatic free reuse is enabled', async () => {
+  const requests = [];
+  const messages = [];
+  const stops = [];
+  let currentState = {
+    heroSmsApiKey: 'demo-key',
+    heroSmsReuseEnabled: true,
+    freePhoneReuseEnabled: true,
+    freePhoneReuseAutoEnabled: true,
+    verificationResendCount: 0,
+    currentPhoneActivation: null,
+    reusablePhoneActivation: {
+      activationId: 'paid-reuse',
+      phoneNumber: '66950003333',
+      provider: 'hero-sms',
+      serviceCode: 'dr',
+      countryId: 52,
+      countryLabel: 'Thailand',
+      successfulUses: 0,
+      maxUses: 3,
+    },
+    freeReusablePhoneActivation: {
+      phoneNumber: '84943328460',
+      provider: 'hero-sms',
+      serviceCode: 'dr',
+      countryId: 52,
+      countryLabel: 'Thailand',
+      successfulUses: 1,
+      maxUses: 3,
+      source: 'free-manual-reuse',
+      manualOnly: true,
+    },
+  };
+
+  const helpers = api.createPhoneVerificationHelpers({
+    addLog: async () => {},
+    ensureStep8SignupPageReady: async () => {},
+    fetchImpl: async (url) => {
+      const parsedUrl = new URL(url);
+      requests.push(parsedUrl);
+      throw new Error(`HeroSMS should not be called for manual-only free reuse: ${parsedUrl.searchParams.get('action')}`);
+    },
+    getOAuthFlowStepTimeoutMs: async (defaultTimeoutMs) => defaultTimeoutMs,
+    getState: async () => ({ ...currentState }),
+    requestStop: async (payload) => {
+      stops.push(payload);
+    },
+    sendToContentScriptResilient: async (_source, message) => {
+      messages.push(message);
+      if (message.type === 'SUBMIT_PHONE_NUMBER') {
+        assert.equal(message.payload.phoneNumber, '84943328460');
+        return { phoneVerificationPage: true, url: 'https://auth.openai.com/phone-verification' };
+      }
+      throw new Error(`Unexpected content-script message: ${message.type}`);
+    },
+    setState: async (updates) => {
+      currentState = { ...currentState, ...updates };
+    },
+    sleepWithStop: async () => {},
+    throwIfStopped: () => {},
+  });
+
+  await assert.rejects(
+    helpers.completePhoneVerificationFlow(1, {
+      addPhonePage: true,
+      phoneVerificationPage: false,
+      url: 'https://auth.openai.com/add-phone',
+    }),
+    (error) => {
+      assert.match(error.message, /^PHONE_MANUAL_FREE_REUSE::/);
+      assert.equal(error.result?.manualFreePhoneReuse, true);
+      assert.equal(error.result?.phoneNumber, '84943328460');
+      assert.deepStrictEqual(error.result?.fillResult, {
+        phoneVerificationPage: true,
+        url: 'https://auth.openai.com/phone-verification',
+      });
+      return true;
+    }
+  );
+
+  assert.deepStrictEqual(messages.map((message) => message.type), ['SUBMIT_PHONE_NUMBER']);
+  assert.equal(stops.length, 1);
+  assert.match(stops[0].logMessage, /开始手动复用手机 84943328460/);
+  assert.deepStrictEqual(requests, []);
+  assert.equal(currentState.currentPhoneActivation, null);
+  assert.equal(currentState.reusablePhoneActivation.activationId, 'paid-reuse');
+  assert.equal(currentState.freeReusablePhoneActivation.phoneNumber, '84943328460');
+});
+
+test('phone verification helper infers manual free reuse country from phone prefix', async () => {
+  const messages = [];
+  const stops = [];
+  let currentState = {
+    heroSmsApiKey: 'demo-key',
+    heroSmsCountryId: 52,
+    heroSmsCountryLabel: 'Thailand',
+    freePhoneReuseEnabled: true,
+    freePhoneReuseAutoEnabled: true,
+    verificationResendCount: 0,
+    currentPhoneActivation: null,
+    freeReusablePhoneActivation: {
+      phoneNumber: '84943328460',
+      provider: 'hero-sms',
+      serviceCode: 'dr',
+      successfulUses: 1,
+      maxUses: 3,
+      source: 'free-manual-reuse',
+      manualOnly: true,
+    },
+  };
+
+  const helpers = api.createPhoneVerificationHelpers({
+    addLog: async () => {},
+    ensureStep8SignupPageReady: async () => {},
+    fetchImpl: async (url) => {
+      const parsedUrl = new URL(url);
+      throw new Error(`HeroSMS should not be called for manual-only free reuse: ${parsedUrl.searchParams.get('action')}`);
+    },
+    getOAuthFlowStepTimeoutMs: async (defaultTimeoutMs) => defaultTimeoutMs,
+    getState: async () => ({ ...currentState }),
+    requestStop: async (payload) => {
+      stops.push(payload);
+    },
+    sendToContentScriptResilient: async (_source, message) => {
+      messages.push(message);
+      if (message.type === 'SUBMIT_PHONE_NUMBER') {
+        return { phoneVerificationPage: true, url: 'https://auth.openai.com/phone-verification' };
+      }
+      throw new Error(`Unexpected content-script message: ${message.type}`);
+    },
+    setState: async (updates) => {
+      currentState = { ...currentState, ...updates };
+    },
+    sleepWithStop: async () => {},
+    throwIfStopped: () => {},
+  });
+
+  await assert.rejects(
+    helpers.completePhoneVerificationFlow(1, {
+      addPhonePage: true,
+      phoneVerificationPage: false,
+      url: 'https://auth.openai.com/add-phone',
+    }),
+    (error) => {
+      assert.match(error.message, /^PHONE_MANUAL_FREE_REUSE::/);
+      return true;
+    }
+  );
+
+  assert.equal(stops.length, 1);
+  assert.deepStrictEqual(messages.map((message) => message.type), ['SUBMIT_PHONE_NUMBER']);
+  assert.equal(messages[0].payload.phoneNumber, '84943328460');
+  assert.equal(messages[0].payload.countryId, 10);
+  assert.equal(messages[0].payload.countryLabel, 'Vietnam');
+});
+
+test('phone verification helper infers major HeroSMS countries from phone prefixes', async () => {
+  const cases = [
+    { phoneNumber: '12025550123', countryId: 187, countryLabel: 'USA' },
+    { phoneNumber: '447911123456', countryId: 16, countryLabel: 'United Kingdom' },
+    { phoneNumber: '819012345678', countryId: 151, countryLabel: 'Japan' },
+    { phoneNumber: '4915112345678', countryId: 43, countryLabel: 'Germany' },
+    { phoneNumber: '33612345678', countryId: 73, countryLabel: 'France' },
+    { phoneNumber: '84943328460', countryId: 10, countryLabel: 'Vietnam' },
+    { phoneNumber: '66950003333', countryId: 52, countryLabel: 'Thailand' },
+    { phoneNumber: '628111111111', countryId: 6, countryLabel: 'Indonesia' },
+  ];
+
+  for (const testCase of cases) {
+    const messages = [];
+    let currentState = {
+      heroSmsApiKey: 'demo-key',
+      heroSmsCountryId: 52,
+      heroSmsCountryLabel: 'Thailand',
+      freePhoneReuseEnabled: true,
+      freePhoneReuseAutoEnabled: true,
+      verificationResendCount: 0,
+      currentPhoneActivation: null,
+      freeReusablePhoneActivation: {
+        phoneNumber: testCase.phoneNumber,
+        provider: 'hero-sms',
+        serviceCode: 'dr',
+        successfulUses: 1,
+        maxUses: 3,
+        source: 'free-manual-reuse',
+        manualOnly: true,
+      },
+    };
+
+    const helpers = api.createPhoneVerificationHelpers({
+      addLog: async () => {},
+      ensureStep8SignupPageReady: async () => {},
+      fetchImpl: async (url) => {
+        const parsedUrl = new URL(url);
+        throw new Error(`HeroSMS should not be called for manual-only free reuse: ${parsedUrl.searchParams.get('action')}`);
+      },
+      getOAuthFlowStepTimeoutMs: async (defaultTimeoutMs) => defaultTimeoutMs,
+      getState: async () => ({ ...currentState }),
+      requestStop: async () => {},
+      sendToContentScriptResilient: async (_source, message) => {
+        messages.push(message);
+        if (message.type === 'SUBMIT_PHONE_NUMBER') {
+          return { phoneVerificationPage: true, url: 'https://auth.openai.com/phone-verification' };
+        }
+        throw new Error(`Unexpected content-script message: ${message.type}`);
+      },
+      setState: async (updates) => {
+        currentState = { ...currentState, ...updates };
+      },
+      sleepWithStop: async () => {},
+      throwIfStopped: () => {},
+    });
+
+    await assert.rejects(
+      helpers.completePhoneVerificationFlow(1, {
+        addPhonePage: true,
+        phoneVerificationPage: false,
+        url: 'https://auth.openai.com/add-phone',
+      }),
+      (error) => {
+        assert.match(error.message, /^PHONE_MANUAL_FREE_REUSE::/);
+        return true;
+      }
+    );
+
+    assert.equal(messages.length, 1, testCase.phoneNumber);
+    assert.equal(messages[0].payload.phoneNumber, testCase.phoneNumber);
+    assert.equal(messages[0].payload.countryId, testCase.countryId, testCase.phoneNumber);
+    assert.equal(messages[0].payload.countryLabel, testCase.countryLabel, testCase.phoneNumber);
+  }
+});
+
 test('phone verification helper accepts HeroSMS WAIT_RETRY as free-reuse ready without using its suffix as code', async () => {
   const requests = [];
   const events = [];

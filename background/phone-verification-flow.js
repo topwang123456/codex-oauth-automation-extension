@@ -100,6 +100,16 @@
     const FREE_PHONE_REUSE_PREPARE_MAX_ROUNDS = 10;
     const PHONE_SMS_FAILURE_SKIP_THRESHOLD = 2;
     const MAX_ACTIVATION_PRICE_HINTS = 256;
+    const HERO_SMS_COUNTRY_BY_PHONE_PREFIX = Object.freeze([
+      { prefix: '84', id: 10, label: 'Vietnam' },
+      { prefix: '66', id: 52, label: 'Thailand' },
+      { prefix: '62', id: 6, label: 'Indonesia' },
+      { prefix: '44', id: 16, label: 'United Kingdom' },
+      { prefix: '81', id: 151, label: 'Japan' },
+      { prefix: '49', id: 43, label: 'Germany' },
+      { prefix: '33', id: 73, label: 'France' },
+      { prefix: '1', id: 187, label: 'USA' },
+    ]);
     const activationPriceHintsByKey = new Map();
     let activePhoneVerificationLogStep = null;
     let activePhoneVerificationLogStepKey = null;
@@ -420,6 +430,21 @@
 
     function normalizeCountryLabel(value = '', fallback = HERO_SMS_COUNTRY_LABEL) {
       return String(value || '').trim() || fallback;
+    }
+
+    function inferHeroSmsCountryFromPhoneNumber(phoneNumber = '') {
+      const digits = String(phoneNumber || '').replace(/\D+/g, '');
+      if (!digits) {
+        return null;
+      }
+      const match = HERO_SMS_COUNTRY_BY_PHONE_PREFIX.find((entry) => digits.startsWith(entry.prefix));
+      if (!match) {
+        return null;
+      }
+      return {
+        id: normalizeCountryId(match.id, 0),
+        label: normalizeCountryLabel(match.label, `Country #${match.id}`),
+      };
     }
 
     function normalizePhoneCodeWaitSeconds(value) {
@@ -1037,14 +1062,19 @@
       const activationId = String(
         record.activationId ?? record.id ?? record.activation ?? ''
       ).trim();
-      const countryLabel = String(record.countryLabel || '').trim();
+      const inferredCountry = inferHeroSmsCountryFromPhoneNumber(phoneNumber);
+      const countryId = normalizeCountryId(record.countryId, inferredCountry?.id || HERO_SMS_COUNTRY_ID);
+      const countryLabel = String(
+        record.countryLabel
+        || (inferredCountry && inferredCountry.id === countryId ? inferredCountry.label : '')
+      ).trim();
       const statusAction = String(record.statusAction || '').trim();
       return {
         ...(activationId ? { activationId } : {}),
         phoneNumber,
         provider: PHONE_SMS_PROVIDER_HERO,
         serviceCode: String(record.serviceCode || HERO_SMS_SERVICE_CODE).trim() || HERO_SMS_SERVICE_CODE,
-        countryId: normalizeCountryId(record.countryId, HERO_SMS_COUNTRY_ID),
+        countryId,
         ...(countryLabel ? { countryLabel } : {}),
         successfulUses: normalizeUseCount(record.successfulUses),
         maxUses: Math.max(1, Math.floor(Number(record.maxUses) || DEFAULT_PHONE_NUMBER_MAX_USES)),
@@ -3935,7 +3965,16 @@
             };
           }
         } else {
-          const countryId = normalizeCountryId(activation.countryId, 0);
+          const inferredCountry = inferHeroSmsCountryFromPhoneNumber(activation.phoneNumber);
+          const rawCountryId = normalizeCountryId(activation.countryId, 0);
+          const hasExplicitCountry = Object.prototype.hasOwnProperty.call(activation, 'countryId')
+            && Number.isFinite(rawCountryId)
+            && rawCountryId > 0
+            && !(activation.manualOnly && rawCountryId === HERO_SMS_COUNTRY_ID && inferredCountry?.id && inferredCountry.id !== rawCountryId);
+          const countryId = hasExplicitCountry ? rawCountryId : normalizeCountryId(inferredCountry?.id, rawCountryId);
+          const countryLabel = hasExplicitCountry
+            ? activation.countryLabel
+            : (inferredCountry?.label || activation.countryLabel);
           if (countryId > 0) {
             const matched = candidates.find((entry) => entry.id === countryId);
             if (matched) {
@@ -3943,7 +3982,7 @@
             }
             return {
               id: countryId,
-              label: normalizeCountryLabel(activation.countryLabel, `Country #${countryId}`),
+              label: normalizeCountryLabel(countryLabel, `Country #${countryId}`),
             };
           }
         }
@@ -4306,7 +4345,11 @@
         return null;
       }
 
-      if (normalizeFreePhoneReuseAutoEnabled(state)) {
+      const canPrepareAutomaticFreeReuse = normalizeFreePhoneReuseAutoEnabled(state)
+        && !freeReusableActivation.manualOnly
+        && Boolean(String(freeReusableActivation.activationId || '').trim());
+
+      if (canPrepareAutomaticFreeReuse) {
         await addLog(
           `步骤 9：准备自动白嫖复用已保存手机号 ${freeReusableActivation.phoneNumber}（${freeReusableActivation.successfulUses + 1}/${freeReusableActivation.maxUses}）。`,
           'info'
@@ -6266,6 +6309,7 @@
       completeSignupPhoneVerificationFlow,
       finalizeLoginPhoneActivationAfterSuccess,
       finalizeSignupPhoneActivationAfterSuccess,
+      isPhoneResendBannedNumberError,
       normalizeActivation,
       persistCurrentActivation,
       pollPhoneActivationCode,

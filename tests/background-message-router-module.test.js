@@ -28,6 +28,47 @@ test('background free reusable phone setter does not depend on module-scoped pho
   assert.match(setterBlock, /maxUses:\s*Math\.max\(1,\s*Math\.floor\(Number\(record\.maxUses\)\s*\|\|\s*3\)\)/);
 });
 
+test('background free reusable phone setter can recover local HeroSMS activation id by phone number', () => {
+  const source = fs.readFileSync('background.js', 'utf8');
+  const setterStart = source.indexOf('async function setFreeReusablePhoneActivation');
+  const setterEnd = source.indexOf('// ============================================================\n// Tab Registry', setterStart);
+  const setterBlock = source.slice(setterStart, setterEnd);
+
+  assert.match(source, /function findLocalHeroSmsActivationForPhone\(/);
+  assert.match(source, /state\.currentPhoneActivation/);
+  assert.match(source, /state\.reusablePhoneActivation/);
+  assert.match(source, /state\.signupPhoneActivation/);
+  assert.match(source, /state\.signupPhoneCompletedActivation/);
+  assert.match(source, /state\.phonePreferredActivation/);
+  assert.match(source, /state\.phoneReusableActivationPool/);
+  assert.match(setterBlock, /findLocalHeroSmsActivationForPhone\(state,\s*phoneNumber\)/);
+  assert.match(setterBlock, /activationId = String\(\s*record\.activationId[\s\S]*localActivation\?\.activationId/);
+  assert.match(setterBlock, /manualOnly:\s*!activationId/);
+});
+
+test('background HeroSMS phone prefix inference covers built-in major countries', () => {
+  const source = fs.readFileSync('background.js', 'utf8');
+  const supportedStart = source.indexOf('const HERO_SMS_SUPPORTED_COUNTRY_IDS = [');
+  const prefixStart = source.indexOf('const HERO_SMS_COUNTRY_BY_PHONE_PREFIX = Object.freeze([');
+  const prefixEnd = source.indexOf(']);', prefixStart);
+  const supportedBlock = source.slice(supportedStart, source.indexOf('];', supportedStart));
+  const prefixBlock = source.slice(prefixStart, prefixEnd);
+
+  assert.match(supportedBlock, /\[6,\s*52,\s*187,\s*16,\s*151,\s*43,\s*73,\s*10/);
+  [
+    ['84', 10, 'Vietnam'],
+    ['66', 52, 'Thailand'],
+    ['62', 6, 'Indonesia'],
+    ['44', 16, 'United Kingdom'],
+    ['81', 151, 'Japan'],
+    ['49', 43, 'Germany'],
+    ['33', 73, 'France'],
+    ['1', 187, 'USA'],
+  ].forEach(([prefix, id, label]) => {
+    assert.match(prefixBlock, new RegExp(`prefix:\\s*'${prefix}'[\\s\\S]*id:\\s*${id}[\\s\\S]*label:\\s*'${label}'`));
+  });
+});
+
 test('message router module exposes a factory', () => {
   const source = fs.readFileSync('background/message-router.js', 'utf8');
   const globalScope = {};
