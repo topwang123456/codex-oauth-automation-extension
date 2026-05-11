@@ -795,11 +795,9 @@
         task?.api_waiting_for,
         task?.last_input_error,
         task?.otp_invalid_count,
-        task?.reference_id || task?.referenceId,
-        task?.redirect_url || task?.redirectUrl,
-        task?.flow_id || task?.flowId,
-        task?.challenge_id || task?.challengeId,
-        task?.gopay_guid || task?.gopayGuid,
+        task?.failure_stage || task?.failureStage,
+        task?.failure_detail || task?.failureDetail,
+        task?.error_message || task?.errorMessage,
       ].map((value) => String(value ?? '').trim()).join('|');
     }
 
@@ -898,6 +896,9 @@
         gopayHelperFailureStage: '',
         gopayHelperFailureDetail: '',
         gopayHelperTaskPayload: null,
+        gopayHelperTaskProgressSignature: '',
+        gopayHelperTaskProgressAt: 0,
+        gopayHelperTaskProgressTaskId: '',
         gopayHelperPinPayload: null,
         gopayHelperResolvedOtp: '',
         gopayHelperOtpRequestId: '',
@@ -971,8 +972,14 @@
       let lastSubmittedOtp = '';
       let pinSubmitted = false;
       let terminalReached = false;
-      let lastProgressSignature = '';
-      let lastProgressAt = Date.now();
+      let lastProgressSignature = String(state?.gopayHelperTaskProgressSignature || '').trim();
+      let lastProgressAt = normalizeEpochMilliseconds(state?.gopayHelperTaskProgressAt || 0) || Date.now();
+      let lastProgressTaskId = String(state?.gopayHelperTaskProgressTaskId || '').trim();
+      if (lastProgressTaskId !== taskId) {
+        lastProgressSignature = '';
+        lastProgressAt = Date.now();
+        lastProgressTaskId = '';
+      }
       const staleStatusTimeoutMs = getGpcTaskStaleStatusTimeoutMs(state);
 
       if (!taskId) {
@@ -1025,15 +1032,27 @@
           if (shouldWatchGpcTaskProgress(task, state)) {
             const progressSignature = buildGpcTaskProgressSignature(task);
             const now = Date.now();
-            if (progressSignature && progressSignature !== lastProgressSignature) {
+            if (progressSignature && (progressSignature !== lastProgressSignature || lastProgressTaskId !== taskId)) {
               lastProgressSignature = progressSignature;
               lastProgressAt = now;
+              lastProgressTaskId = taskId;
+              await setState({
+                gopayHelperTaskProgressSignature: progressSignature,
+                gopayHelperTaskProgressAt: now,
+                gopayHelperTaskProgressTaskId: taskId,
+              });
             } else if (progressSignature && now - lastProgressAt >= staleStatusTimeoutMs) {
               throw buildGpcTaskStaleStatusError(task, staleStatusTimeoutMs);
             }
           } else {
             lastProgressSignature = '';
             lastProgressAt = Date.now();
+            lastProgressTaskId = '';
+            await setState({
+              gopayHelperTaskProgressSignature: '',
+              gopayHelperTaskProgressAt: 0,
+              gopayHelperTaskProgressTaskId: taskId,
+            });
           }
 
           if (isGpcTaskOtpWait(task, state)) {

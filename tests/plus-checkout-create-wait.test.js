@@ -510,6 +510,63 @@ test('GPC auto checkout only sends access token and API Key', async () => {
   assert.equal(events.find((event) => event.type === 'complete')?.step, 6);
 });
 
+test('GPC auto checkout keeps running when balance payload omits auto mode permission', async () => {
+  const events = [];
+  const fetchCalls = [];
+  const executor = api.createPlusCheckoutCreateExecutor({
+    addLog: async () => {},
+    chrome: {
+      tabs: {
+        create: async () => {
+          throw new Error('should not open token tab when direct access token exists');
+        },
+        remove: async () => {},
+      },
+    },
+    completeStepFromBackground: async (step, payload) => events.push({ type: 'complete', step, payload }),
+    ensureContentScriptReadyOnTabUntilStopped: async () => {},
+    fetch: async (url, options = {}) => {
+      fetchCalls.push({ url, options });
+      return {
+        ok: true,
+        status: 200,
+        json: async () => url.endsWith('/api/gp/balance')
+          ? createGpcBalanceResponse({ auto_mode_enabled: undefined, remaining_uses: 998 })
+          : createGpcTaskResponse({
+              task_id: 'task_auto_unknown_permission',
+              status: 'queued',
+              status_text: '排队中',
+              phone_mode: 'auto',
+              api_waiting_for: '',
+            }),
+      };
+    },
+    registerTab: async () => {},
+    sendTabMessageUntilStopped: async () => ({}),
+    setState: async (payload) => events.push({ type: 'set-state', payload }),
+    sleepWithStop: async () => {},
+    waitForTabCompleteUntilStopped: async () => {},
+  });
+
+  await executor.executePlusCheckoutCreate({
+    plusPaymentMethod: 'gpc-helper',
+    gopayHelperPhoneMode: 'auto',
+    gopayHelperApiUrl: 'https://gpc.qlhazycoder.top/',
+    chatgptAccessToken: 'state-access-token',
+    gopayHelperApiKey: 'gpc_auto_123',
+  });
+
+  assert.equal(fetchCalls.length, 2);
+  assert.equal(fetchCalls[0].url, 'https://gpc.qlhazycoder.top/api/gp/balance');
+  assert.equal(fetchCalls[1].url, 'https://gpc.qlhazycoder.top/api/gp/tasks');
+  const helperPayload = JSON.parse(fetchCalls[1].options.body);
+  assert.equal(helperPayload.phone_mode, 'auto');
+  const statePayload = events.find((event) => event.type === 'set-state')?.payload || {};
+  assert.equal(statePayload.gopayHelperTaskId, 'task_auto_unknown_permission');
+  assert.equal(statePayload.gopayHelperPhoneMode, 'auto');
+  assert.equal(events.find((event) => event.type === 'complete')?.step, 6);
+});
+
 test('GPC auto checkout blocks API Keys without auto mode permission', async () => {
   const fetchCalls = [];
   const executor = api.createPlusCheckoutCreateExecutor({

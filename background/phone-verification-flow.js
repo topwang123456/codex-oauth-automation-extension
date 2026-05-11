@@ -11,6 +11,7 @@
       getOAuthFlowStepTimeoutMs,
       getState,
       requestStop = null,
+      readAuthTabSnapshot = null,
       sendToContentScript,
       sendToContentScriptResilient,
       navigateAuthTabToAddPhone = null,
@@ -1407,6 +1408,55 @@
       return new Error(`${PHONE_RESEND_SERVER_ERROR_PREFIX}${message || 'OpenAI contact-verification page returned HTTP ERROR 500 after resend.'}`);
     }
 
+    function getPhoneResendServerErrorFromSnapshot(snapshot = {}) {
+      const rawUrl = String(snapshot?.url || snapshot?.href || '').trim();
+      if (!/\/contact-verification(?:[/?#]|$)/i.test(rawUrl)) {
+        return '';
+      }
+      const bodyText = [
+        snapshot?.text,
+        snapshot?.bodyText,
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      const titleText = String(snapshot?.title || '').replace(/\s+/g, ' ').trim();
+      if (!bodyText) {
+        return isPhoneResendServerError(titleText) ? (titleText || 'OpenAI contact-verification page returned HTTP ERROR 500 after resend.') : '';
+      }
+      const combined = [
+        bodyText,
+        titleText,
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (!isPhoneResendServerError(combined)) {
+        return '';
+      }
+      return combined || 'OpenAI contact-verification page returned HTTP ERROR 500 after resend.';
+    }
+
+    async function readPhoneResendServerErrorFromAuthTab(tabId) {
+      if (typeof readAuthTabSnapshot !== 'function') {
+        return '';
+      }
+      try {
+        return getPhoneResendServerErrorFromSnapshot(await readAuthTabSnapshot(tabId));
+      } catch (_) {
+        return '';
+      }
+    }
+
+    async function throwPhoneResendServerErrorIfAuthTabShowsIt(tabId) {
+      const serverErrorText = await readPhoneResendServerErrorFromAuthTab(tabId);
+      if (serverErrorText) {
+        throw buildPhoneResendServerError(serverErrorText);
+      }
+    }
+
     function shouldTreatResendThrottledAsBanned(state = {}) {
       return Boolean(state?.phoneResendThrottledAsBannedEnabled);
     }
@@ -1459,7 +1509,7 @@
 
     function isAuthContentScriptUnreachableError(error) {
       const message = String(error?.message || error || '').trim();
-      return /Receiving end does not exist|Could not establish connection|Frame with ID \d+ is showing error page/i.test(message);
+      return /Receiving end does not exist|Could not establish connection|Frame with ID \d+ is showing error page|等待认证页状态检查超时/i.test(message);
     }
 
     function buildPhoneRestartStep7Error(phoneNumber = '') {
@@ -4010,29 +4060,46 @@
 
     async function readPhonePageState(tabId, timeoutMs = 10000) {
       const visibleStep = normalizeLogStep(activePhoneVerificationLogStep) || 9;
-      await ensureStep8SignupPageReady(tabId, {
-        timeoutMs,
-        logMessage: '步骤 9：等待认证页脚本恢复后继续手机号验证。',
-        visibleStep,
-        logStepKey: 'phone-verification',
+      const deadlineMs = Math.max(1, Math.floor(Number(timeoutMs) || 0));
+      let timeoutId = null;
+      const timeoutPromise = new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+          reject(new Error(`步骤 ${visibleStep}：等待认证页状态检查超时。`));
+        }, deadlineMs);
       });
-      const result = await sendToContentScriptResilient('signup-page', {
-        type: 'STEP8_GET_STATE',
-        source: 'background',
-        payload: { visibleStep },
-      }, {
-        timeoutMs,
-        responseTimeoutMs: timeoutMs,
-        retryDelayMs: 600,
-        logMessage: '步骤 9：认证页正在切换，等待后重新检查手机号验证状态...',
-        logStep: visibleStep,
-        logStepKey: 'phone-verification',
-      });
+      const readPromise = (async () => {
+        await ensureStep8SignupPageReady(tabId, {
+          timeoutMs: deadlineMs,
+          logMessage: '步骤 9：等待认证页脚本恢复后继续手机号验证。',
+          visibleStep,
+          logStepKey: 'phone-verification',
+        });
+        const result = await sendToContentScriptResilient('signup-page', {
+          type: 'STEP8_GET_STATE',
+          source: 'background',
+          payload: { visibleStep },
+        }, {
+          timeoutMs: deadlineMs,
+          responseTimeoutMs: deadlineMs,
+          retryDelayMs: 600,
+          logMessage: '步骤 9：认证页正在切换，等待后重新检查手机号验证状态...',
+          logStep: visibleStep,
+          logStepKey: 'phone-verification',
+        });
 
-      if (result?.error) {
-        throw new Error(result.error);
+        if (result?.error) {
+          throw new Error(result.error);
+        }
+        return result || {};
+      })();
+
+      try {
+        return await Promise.race([readPromise, timeoutPromise]);
+      } finally {
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+        }
       }
-      return result || {};
     }
 
     function resolveCountryCandidatesForProvider(state = {}, providerId = normalizePhoneSmsProvider(state?.phoneSmsProvider)) {
@@ -5409,13 +5476,14 @@
       return withPhoneVerificationLogContext({ step: 4, stepKey: 'fetch-signup-code' }, async () => {
         let state = options?.state || await getState();
         const activation = normalizeActivation(options?.activation || state?.signupPhoneActivation);
+        const pageStateCheckTimeoutMs = Math.max(1, Math.floor(Number(options?.pageStateCheckTimeoutMs) || 5000));
         if (!activation) {
           throw new Error('步骤 4：未找到当前注册手机号激活记录，请重新执行步骤 2。');
         }
 
         const assertSignupPhoneStillApplicable = async (phaseLabel) => {
           try {
-            const pageState = await readPhonePageState(tabId, 5000);
+            const pageState = await readPhonePageState(tabId, pageStateCheckTimeoutMs);
             if (isSignupEmailVerificationPageState(pageState)) {
               throw buildSignupPhoneStaleEmailVerificationError(pageState);
             }
@@ -5424,6 +5492,7 @@
             if (isStopRequestedError(error) || isStaleSignupPhoneEmailVerificationError(error)) {
               throw error;
             }
+            await throwPhoneResendServerErrorIfAuthTabShowsIt(tabId);
             await addLog(
               `步骤 4：检查注册手机号页面状态（${phaseLabel}）失败，将继续等待短信。${error.message}`,
               'warn',
@@ -5460,6 +5529,7 @@
                   if (isPhoneResendServerError(resendError)) {
                     throw buildPhoneResendServerError(resendError);
                   }
+                  await throwPhoneResendServerErrorIfAuthTabShowsIt(tabId);
                   await addLog(`步骤 4：注册手机验证码页面重发失败，将继续轮询短信。${resendError.message}`, 'warn', {
                     step: 4,
                     stepKey: 'fetch-signup-code',
@@ -5500,6 +5570,7 @@
                 if (isPhoneResendServerError(resendError)) {
                   throw buildPhoneResendServerError(resendError);
                 }
+                await throwPhoneResendServerErrorIfAuthTabShowsIt(tabId);
                 await addLog(`步骤 4：验证码被拒后点击重发失败。${resendError.message}`, 'warn', {
                   step: 4,
                   stepKey: 'fetch-signup-code',

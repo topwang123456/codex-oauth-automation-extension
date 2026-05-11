@@ -671,6 +671,9 @@ const PERSISTED_SETTING_DEFAULTS = {
   gopayHelperFailureStage: '',
   gopayHelperFailureDetail: '',
   gopayHelperTaskPayload: null,
+  gopayHelperTaskProgressSignature: '',
+  gopayHelperTaskProgressAt: 0,
+  gopayHelperTaskProgressTaskId: '',
   gopayHelperBalance: '',
   gopayHelperBalancePayload: null,
   gopayHelperBalanceUpdatedAt: 0,
@@ -842,6 +845,9 @@ const DEFAULT_STATE = {
   gopayHelperFailureDetail: '',
   gopayHelperTaskPayload: null,
   gopayHelperOrderCreatedAt: 0,
+  gopayHelperTaskProgressSignature: '',
+  gopayHelperTaskProgressAt: 0,
+  gopayHelperTaskProgressTaskId: '',
   gopayHelperPinPayload: null,
   gopayHelperResolvedOtp: '',
   gopayHelperOtpRequestId: '',
@@ -2989,7 +2995,10 @@ async function setEmailStateSilently(email) {
 async function setEmailState(email) {
   await setEmailStateSilently(email);
   if (email) {
-    await appendManualAccountRunRecordIfNeeded('step2_stopped', null, '步骤 2 已使用邮箱，流程尚未完成。');
+    const latestState = await getState();
+    const recordStatus = shouldMarkAccountRunRecordRunning(latestState) ? 'running' : 'step2_stopped';
+    const recordReason = recordStatus === 'running' ? '正在运行' : '步骤 2 已使用邮箱，流程尚未完成。';
+    await appendManualAccountRunRecordIfNeeded(recordStatus, latestState, recordReason);
     await resumeAutoRunIfWaitingForEmail();
   }
 }
@@ -3029,8 +3038,17 @@ async function setSignupPhoneStateSilently(phoneNumber) {
 async function setSignupPhoneState(phoneNumber) {
   await setSignupPhoneStateSilently(phoneNumber);
   if (String(phoneNumber || '').trim()) {
-    await appendManualAccountRunRecordIfNeeded('step2_stopped', null, '步骤 2 已使用手机号，流程尚未完成。');
+    const latestState = await getState();
+    const recordStatus = shouldMarkAccountRunRecordRunning(latestState) ? 'running' : 'step2_stopped';
+    const recordReason = recordStatus === 'running' ? '正在运行' : '步骤 2 已使用手机号，流程尚未完成。';
+    await appendManualAccountRunRecordIfNeeded(recordStatus, latestState, recordReason);
   }
+}
+
+function shouldMarkAccountRunRecordRunning(state = {}) {
+  const phase = String(state.autoRunPhase || '').trim().toLowerCase();
+  return Boolean(state.autoRunning)
+    && ['running', 'waiting_step', 'waiting_email', 'retrying'].includes(phase);
 }
 
 async function setPasswordState(password) {
@@ -7573,7 +7591,8 @@ function getErrorMessage(error) {
     return loggingStatus.getErrorMessage(error);
   }
   return String(typeof error === 'string' ? error : error?.message || '')
-    .replace(/^GPC_TASK_ENDED::/i, '');
+    .replace(/^GPC_TASK_ENDED::/i, '')
+    .replace(/^AUTO_RUN_STEP_IDLE_RESTART::/i, '');
 }
 
 function isCloudflareSecurityBlockedError(error) {
@@ -7807,7 +7826,22 @@ function isGpcCheckoutRestartRequiredFailure(error) {
   if (/GPC_TASK_ENDED::/i.test(rawMessage)) {
     return true;
   }
-  return /GPC\s*API\s*请求超时|GPC\s*任务状态超过\s*\d+\s*秒无进展|GPC[\s\S]*请重新创建任务|步骤\s*[67][\s\S]*GPC[\s\S]*(?:任务轮询超时|请求超时|超时|timeout|timed\s*out|卡死|无响应)|account\s+already\s+linked|GOPAY已经绑了订阅|(?:账号|账户|GoPay|GOPAY)[\s\S]*(?:已绑定|已经绑定|已绑|绑了订阅|绑定了订阅)|创建\s*GPC\s*订单失败[\s\S]*(?:任务已结束|任务结束|failed|expired|discarded|请求超时|timeout|timed\s*out)/i.test(message);
+  return /GPC\s*API\s*请求超时|GPC\s*任务状态超过\s*\d+\s*秒无进展|GPC[\s\S]*请重新创建任务|步骤\s*[67][\s\S]*GPC[\s\S]*(?:access\s*token|accessToken|任务轮询超时|请求超时|超时|timeout|timed\s*out|卡死|无响应|失败)|account\s+already\s+linked|GOPAY已经绑了订阅|(?:账号|账户|GoPay|GOPAY)[\s\S]*(?:已绑定|已经绑定|已绑|绑了订阅|绑定了订阅)|创建\s*GPC\s*订单失败[\s\S]*(?:任务已结束|任务结束|failed|expired|discarded|请求超时|timeout|timed\s*out)/i.test(message);
+}
+
+function isPlusCheckoutRestartStep(step, stepExecutionKey = '', state = {}) {
+  const normalizedKey = String(stepExecutionKey || '').trim();
+  if (normalizedKey === 'plus-checkout-create'
+    || normalizedKey === 'plus-checkout-billing'
+    || normalizedKey === 'gopay-subscription-confirm') {
+    return true;
+  }
+  const numericStep = Number(step);
+  return Boolean(state?.plusModeEnabled) && (numericStep === 6 || numericStep === 7);
+}
+
+function isPlusCheckoutRestartRequiredFailure(error) {
+  return !isPlusCheckoutNonFreeTrialFailure(error);
 }
 
 function isGoPayCheckoutRestartRequiredFailure(error) {
@@ -7893,6 +7927,9 @@ function getDownstreamStateResets(step, state = {}) {
     gopayHelperFailureDetail: '',
     gopayHelperTaskPayload: null,
     gopayHelperOrderCreatedAt: 0,
+    gopayHelperTaskProgressSignature: '',
+    gopayHelperTaskProgressAt: 0,
+    gopayHelperTaskProgressTaskId: '',
     gopayHelperPinPayload: null,
     gopayHelperResolvedOtp: '',
     gopayHelperOtpRequestId: '',
@@ -9251,6 +9288,10 @@ async function handleStepData(step, payload) {
 const stepWaiters = new Map();
 let resumeWaiter = null;
 const AUTO_RUN_SIGNAL_COMPLETION_TIMEOUT_MS = 120000;
+const AUTO_RUN_STEP_IDLE_LOG_TIMEOUT_MS = 5 * 60 * 1000;
+const AUTO_RUN_STEP_IDLE_LOG_CHECK_INTERVAL_MS = 5000;
+const AUTO_RUN_STEP_IDLE_RESTART_MAX_ATTEMPTS = 3;
+const AUTO_RUN_STEP_IDLE_RESTART_ERROR_PREFIX = 'AUTO_RUN_STEP_IDLE_RESTART::';
 const AUTO_RUN_BACKGROUND_COMPLETED_STEPS = new Set([1, 2, 4, 6, 7, 8, 9]);
 const STEP_COMPLETION_SIGNAL_STEPS = new Set([3, 5, 10, 12]);
 const AUTO_RUN_BACKGROUND_COMPLETED_STEP_KEYS = new Set([
@@ -9488,6 +9529,120 @@ async function executeStepViaCompletionSignal(step, timeoutMs = 0) {
   }
 
   throw completionResult.error;
+}
+
+function getLatestLogTimestamp(logs = [], fallback = 0) {
+  if (!Array.isArray(logs) || !logs.length) {
+    return Number.isFinite(Number(fallback)) ? Number(fallback) : 0;
+  }
+  return logs.reduce((latest, entry) => {
+    const timestamp = Number(entry?.timestamp);
+    return Number.isFinite(timestamp) && timestamp > latest ? timestamp : latest;
+  }, Number.isFinite(Number(fallback)) ? Number(fallback) : 0);
+}
+
+function buildAutoRunStepIdleRestartError(step, idleMs = AUTO_RUN_STEP_IDLE_LOG_TIMEOUT_MS) {
+  const seconds = Math.max(1, Math.round((Number(idleMs) || AUTO_RUN_STEP_IDLE_LOG_TIMEOUT_MS) / 1000));
+  const error = new Error(`${AUTO_RUN_STEP_IDLE_RESTART_ERROR_PREFIX}步骤 ${step} 已连续 ${seconds} 秒没有新日志，准备重新开始当前步骤。`);
+  error.autoRunStepIdleRestart = true;
+  error.failedStep = Math.floor(Number(step) || 0);
+  return error;
+}
+
+function isAutoRunStepIdleRestartError(error) {
+  const message = String(typeof error === 'string' ? error : error?.message || '');
+  return Boolean(error?.autoRunStepIdleRestart) || message.startsWith(AUTO_RUN_STEP_IDLE_RESTART_ERROR_PREFIX);
+}
+
+function startAutoRunStepIdleLogWatchdog(step, options = {}) {
+  const idleTimeoutMs = Math.max(1000, Math.floor(Number(options.idleTimeoutMs) || AUTO_RUN_STEP_IDLE_LOG_TIMEOUT_MS));
+  const checkIntervalMs = Math.max(250, Math.min(idleTimeoutMs, Math.floor(Number(options.checkIntervalMs) || AUTO_RUN_STEP_IDLE_LOG_CHECK_INTERVAL_MS)));
+  let cancelled = false;
+  let timer = null;
+  let lastActivityAt = Date.now();
+
+  const promise = new Promise((_, reject) => {
+    const schedule = () => {
+      if (cancelled) {
+        return;
+      }
+      const idleForMs = Math.max(0, Date.now() - lastActivityAt);
+      const delayMs = Math.max(50, Math.min(checkIntervalMs, idleTimeoutMs - idleForMs));
+      timer = setTimeout(check, delayMs);
+    };
+
+    const check = async () => {
+      if (cancelled) {
+        return;
+      }
+      try {
+        const state = await getState();
+        if (state?.plusManualConfirmationPending) {
+          lastActivityAt = Date.now();
+          schedule();
+          return;
+        }
+
+        const latestLogAt = getLatestLogTimestamp(state?.logs || [], lastActivityAt);
+        if (latestLogAt > lastActivityAt) {
+          lastActivityAt = latestLogAt;
+        }
+
+        const idleForMs = Date.now() - lastActivityAt;
+        if (idleForMs >= idleTimeoutMs) {
+          reject(buildAutoRunStepIdleRestartError(step, idleForMs));
+          return;
+        }
+      } catch (_err) {
+        // Watchdog read failures should not break the real step; retry the check.
+      }
+      schedule();
+    };
+
+    schedule();
+  });
+
+  return {
+    promise,
+    cancel() {
+      cancelled = true;
+      if (timer) {
+        clearTimeout(timer);
+      }
+    },
+  };
+}
+
+async function runAutoStepActionWithIdleLogWatchdog(step, action, options = {}) {
+  const executionPromise = Promise.resolve().then(action);
+  const watchdog = startAutoRunStepIdleLogWatchdog(step, options);
+  try {
+    return await Promise.race([
+      executionPromise,
+      watchdog.promise,
+    ]);
+  } catch (error) {
+    if (isAutoRunStepIdleRestartError(error)) {
+      void executionPromise.catch((lateError) => {
+        const lateMessage = getErrorMessage(lateError);
+        if (!lateMessage || isStopError(lateError) || isAutoRunStepIdleRestartError(lateError)) {
+          return;
+        }
+        addLog(`步骤 ${step}：无日志重开后收到原执行失败：${lateMessage}`, 'warn').catch(() => {});
+      });
+    }
+    throw error;
+  } finally {
+    watchdog.cancel();
+  }
+}
+
+async function executeStepAndWaitWithAutoRunIdleLogWatchdog(step, delayAfter = 2000, options = {}) {
+  return runAutoStepActionWithIdleLogWatchdog(
+    step,
+    () => executeStepAndWait(step, delayAfter),
+    options
+  );
 }
 
 async function waitForRunningStepsToFinish(payload = {}) {
@@ -10871,7 +11026,9 @@ async function runAutoSequenceFromStep(startStep, context = {}) {
   let postStep7RestartCount = 0;
   let goPayCheckoutRestartCount = 0;
   let gpcCheckoutRestartCount = 0;
+  let plusCheckoutRestartCount = 0;
   let step4RestartCount = 0;
+  const stepIdleRestartCounts = new Map();
   let currentStartStep = startStep;
   let continueCurrentAttempt = continued;
   const resolvedSignupMethod = await ensureResolvedSignupMethodForRun();
@@ -10897,6 +11054,39 @@ async function runAutoSequenceFromStep(startStep, context = {}) {
 
     return error;
   };
+  const restartCurrentStepAfterIdle = async (step, error) => {
+    if (!isAutoRunStepIdleRestartError(error)) {
+      return false;
+    }
+
+    const idleRestartCount = (stepIdleRestartCounts.get(step) || 0) + 1;
+    stepIdleRestartCounts.set(step, idleRestartCount);
+    if (idleRestartCount > AUTO_RUN_STEP_IDLE_RESTART_MAX_ATTEMPTS) {
+      await addLog(
+        `步骤 ${step}：已连续 ${AUTO_RUN_STEP_IDLE_RESTART_MAX_ATTEMPTS} 次因 5 分钟无新日志而重开，停止自动重试。原因：${getErrorMessage(error)}`,
+        'error'
+      );
+      throw error;
+    }
+
+    const reason = getErrorMessage(error);
+    if (typeof cancelPendingCommands === 'function') {
+      cancelPendingCommands(`步骤 ${step} 5 分钟没有新日志，准备重开当前步骤。`);
+    }
+    if (typeof broadcastStopToContentScripts === 'function') {
+      await broadcastStopToContentScripts();
+    }
+    await addLog(
+      `步骤 ${step}：5 分钟没有新日志，准备重新开始当前步骤（第 ${idleRestartCount}/${AUTO_RUN_STEP_IDLE_RESTART_MAX_ATTEMPTS} 次）。原因：${reason}`,
+      'warn'
+    );
+    await invalidateDownstreamAfterStepRestart(Math.max(0, step - 1), {
+      logLabel: `步骤 ${step} 因 5 分钟无新日志准备重开（第 ${idleRestartCount}/${AUTO_RUN_STEP_IDLE_RESTART_MAX_ATTEMPTS} 次）`,
+    });
+    currentStartStep = step;
+    continueCurrentAttempt = true;
+    return true;
+  };
 
   while (true) {
 
@@ -10907,16 +11097,40 @@ async function runAutoSequenceFromStep(startStep, context = {}) {
   }
 
   if (currentStartStep <= 1) {
-    await executeStepAndWait(1, AUTO_STEP_DELAYS[1]);
+    try {
+      await executeStepAndWaitWithAutoRunIdleLogWatchdog(1, AUTO_STEP_DELAYS[1]);
+    } catch (err) {
+      attachFailedStep(err, 1);
+      if (isStopError(err)) {
+        throw err;
+      }
+      if (await restartCurrentStepAfterIdle(1, err)) {
+        continue;
+      }
+      throw err;
+    }
   }
 
   if (currentStartStep <= 2) {
-    if (resolvedSignupMethod === SIGNUP_METHOD_PHONE) {
-      await addLog(`=== 目标 ${targetRun}/${totalRuns} 轮：本轮注册方式为手机号注册，将跳过邮箱预获取 ===`, 'info');
-    } else {
-      await ensureAutoEmailReady(targetRun, totalRuns, attemptRuns);
+    try {
+      await runAutoStepActionWithIdleLogWatchdog(2, async () => {
+        if (resolvedSignupMethod === SIGNUP_METHOD_PHONE) {
+          await addLog(`=== 目标 ${targetRun}/${totalRuns} 轮：本轮注册方式为手机号注册，将跳过邮箱预获取 ===`, 'info');
+        } else {
+          await ensureAutoEmailReady(targetRun, totalRuns, attemptRuns);
+        }
+        await executeStepAndWait(2, AUTO_STEP_DELAYS[2]);
+      });
+    } catch (err) {
+      attachFailedStep(err, 2);
+      if (isStopError(err)) {
+        throw err;
+      }
+      if (await restartCurrentStepAfterIdle(2, err)) {
+        continue;
+      }
+      throw err;
     }
-    await executeStepAndWait(2, AUTO_STEP_DELAYS[2]);
   }
 
   let restartFromStep1WithCurrentEmail = false;
@@ -10934,11 +11148,14 @@ async function runAutoSequenceFromStep(startStep, context = {}) {
       await addLog(`自动运行：步骤 3 当前状态为 ${step3Status}，将直接继续后续流程。`, 'info');
     } else {
       try {
-        await executeStepAndWait(3, AUTO_STEP_DELAYS[3]);
+        await executeStepAndWaitWithAutoRunIdleLogWatchdog(3, AUTO_STEP_DELAYS[3]);
       } catch (err) {
         attachFailedStep(err, 3);
         if (isStopError(err)) {
           throw err;
+        }
+        if (await restartCurrentStepAfterIdle(3, err)) {
+          continue;
         }
         if (isSignupPhonePasswordMismatchFailure(err)) {
           step4RestartCount += 1;
@@ -10980,7 +11197,7 @@ async function runAutoSequenceFromStep(startStep, context = {}) {
       continue;
     }
     try {
-      await executeStepAndWait(step, AUTO_STEP_DELAYS[step]);
+      await executeStepAndWaitWithAutoRunIdleLogWatchdog(step, AUTO_STEP_DELAYS[step]);
       step += 1;
     } catch (err) {
       attachFailedStep(err, step);
@@ -10988,21 +11205,41 @@ async function runAutoSequenceFromStep(startStep, context = {}) {
         throw err;
       }
 
+      if (await restartCurrentStepAfterIdle(step, err)) {
+        continue;
+      }
+
       const stepExecutionKey = typeof getStepExecutionKeyForState === 'function'
         ? getStepExecutionKeyForState(step, latestState)
         : '';
       const isGpcCheckoutStep = normalizePlusPaymentMethodForRun(latestState?.plusPaymentMethod) === plusPaymentMethodGpcHelper
         || String(latestState?.plusCheckoutSource || '').trim() === plusPaymentMethodGpcHelper;
-      if (isGpcCheckoutStep
-        && (stepExecutionKey === 'plus-checkout-create' || stepExecutionKey === 'plus-checkout-billing')
-        && isGpcCheckoutRestartRequiredFailure(err)) {
-        gpcCheckoutRestartCount += 1;
+      if (isPlusCheckoutRestartStep(step, stepExecutionKey, latestState)
+        && isPlusCheckoutRestartRequiredFailure(err)) {
+        const isGoPayCheckoutStep = stepExecutionKey === 'gopay-subscription-confirm'
+          || normalizePlusPaymentMethodForRun(latestState?.plusPaymentMethod) === 'gopay';
+        if (isGpcCheckoutStep) {
+          gpcCheckoutRestartCount += 1;
+        } else if (isGoPayCheckoutStep) {
+          goPayCheckoutRestartCount += 1;
+        } else {
+          plusCheckoutRestartCount += 1;
+        }
+        const checkoutRestartCount = isGpcCheckoutStep
+          ? gpcCheckoutRestartCount
+          : (isGoPayCheckoutStep ? goPayCheckoutRestartCount : plusCheckoutRestartCount);
+        const checkoutLabel = isGpcCheckoutStep
+          ? 'GPC 任务'
+          : (isGoPayCheckoutStep ? 'GoPay 订阅' : 'Plus Checkout');
+        const recreateLabel = isGpcCheckoutStep
+          ? '重新创建 GPC 任务'
+          : (isGoPayCheckoutStep ? '重新创建 GoPay 订阅' : '重新创建 Plus Checkout');
         await addLog(
-          `步骤 ${step}：检测到 GPC 任务失败/卡住，准备回到步骤 6 重新创建 GPC 任务（第 ${gpcCheckoutRestartCount} 次）。原因：${getErrorMessage(err)}`,
+          `步骤 ${step}：检测到 ${checkoutLabel} 失败/卡住，准备回到步骤 6 ${recreateLabel}（第 ${checkoutRestartCount} 次）。原因：${getErrorMessage(err)}`,
           'warn'
         );
         await invalidateDownstreamAfterStepRestart(5, {
-          logLabel: `步骤 ${step} GPC 任务失败后准备回到步骤 6 重试（第 ${gpcCheckoutRestartCount} 次）`,
+          logLabel: `步骤 ${step} ${checkoutLabel}失败后准备回到步骤 6 重试（第 ${checkoutRestartCount} 次）`,
         });
         step = 6;
         continue;
@@ -11319,6 +11556,7 @@ const phoneVerificationHelpers = self.MultiPageBackgroundPhoneVerification?.crea
   DEFAULT_PHONE_CODE_TIMEOUT_WINDOWS,
   DEFAULT_PHONE_CODE_POLL_INTERVAL_SECONDS,
   DEFAULT_PHONE_CODE_POLL_ROUNDS,
+  readAuthTabSnapshot,
   ensureStep8SignupPageReady,
   navigateAuthTabToAddPhone: async (tabId, options = {}) => {
     const visibleStep = Math.floor(Number(options.visibleStep || options.step) || 0) || 9;
@@ -12204,7 +12442,7 @@ async function getPostStep6AutoRestartDecision(step, error) {
     if (isPhoneSmsPlatformRateLimitFailure(normalizedMessage)) {
       return false;
     }
-    return /HeroSMS|phone verification did not succeed|number replacements|sms_timeout_after_resend|phone number is already linked|add-phone keeps rejecting current number|接码|手机号|手机验证码|步骤\s*9.*(?:手机号|验证码)|Step\s*9.*phone verification/i.test(normalizedMessage);
+    return /HeroSMS|phone verification did not succeed|number replacements|sms_timeout_after(?:_[a-z0-9_]+)?|phone number is already linked|add-phone keeps rejecting current number|手机验证码|短信验证码|接码|步骤\s*9[：:][\s\S]*(?:手机号验证|手机验证码|接码|没有可用手机号|无可用手机号)|(?:手机号验证|手机号码验证|手机号接码|手机号码接码)[\s\S]*(?:失败|超时|未成功|不可用|拒绝)|(?:手机号|手机号码)[\s\S]*(?:已绑定|被占用|不可用|拒绝|失败|超时|没有可用|无可用)|Step\s*9.*phone verification/i.test(normalizedMessage);
   };
 
   const normalizedStep = Number(step);
@@ -12638,6 +12876,37 @@ async function ensureStep8SignupPageReady(tabId, options = {}) {
     logStep: visibleStep > 0 ? visibleStep : null,
     logStepKey: options.logStepKey || '',
   });
+}
+
+async function readAuthTabSnapshot(tabId) {
+  if (!Number.isInteger(tabId)) {
+    return null;
+  }
+  let tabSnapshot = null;
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    tabSnapshot = {
+      url: String(tab?.url || ''),
+      title: String(tab?.title || ''),
+      text: '',
+    };
+  } catch {
+    tabSnapshot = null;
+  }
+  try {
+    const executionResults = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: 'ISOLATED',
+      func: () => ({
+        url: String(location.href || ''),
+        title: String(document.title || ''),
+        text: String(document.body?.innerText || document.documentElement?.innerText || '').trim(),
+      }),
+    });
+    return executionResults?.[0]?.result || tabSnapshot;
+  } catch {
+    return tabSnapshot;
+  }
 }
 
 async function getStep8PageState(tabId, responseTimeoutMs = 1500, visibleStep = 9) {

@@ -210,13 +210,42 @@
       return Number.isFinite(numeric) ? Math.max(0, Math.floor(numeric)) : null;
     }
 
-    function isGpcAutoModeEnabled(payload = {}) {
-      const rootScope = typeof self !== 'undefined' ? self : globalThis;
-      if (rootScope.GoPayUtils?.isGpcAutoModeEnabled) {
-        return rootScope.GoPayUtils.isGpcAutoModeEnabled(payload);
+    function normalizeGpcAutoModePermissionValue(value) {
+      if (typeof value === 'boolean') {
+        return value;
       }
+      if (typeof value === 'number') {
+        if (value === 1) return true;
+        if (value === 0) return false;
+      }
+      const normalized = String(value ?? '').trim().toLowerCase();
+      if (!normalized) {
+        return null;
+      }
+      if (['true', '1', 'yes', 'y', 'on', 'enabled', 'enable'].includes(normalized)) {
+        return true;
+      }
+      if (['false', '0', 'no', 'n', 'off', 'disabled', 'disable'].includes(normalized)) {
+        return false;
+      }
+      return null;
+    }
+
+    function getGpcAutoModePermission(payload = {}) {
       const data = unwrapGpcResponse(payload);
-      return data?.auto_mode_enabled === true || data?.autoModeEnabled === true;
+      if (!data || typeof data !== 'object' || Array.isArray(data)) {
+        return null;
+      }
+      return normalizeGpcAutoModePermissionValue(
+        data.auto_mode_enabled
+        ?? data.autoModeEnabled
+        ?? data.auto_enabled
+        ?? data.autoEnabled
+      );
+    }
+
+    function isGpcAutoModePermissionDenied(payload = {}) {
+      return getGpcAutoModePermission(payload) === false;
     }
 
     async function assertGpcApiKeyReadyForCreate(state = {}, phoneMode = GPC_HELPER_PHONE_MODE_MANUAL, apiKey = '') {
@@ -244,7 +273,7 @@
       if (remainingUses !== null && remainingUses <= 0) {
         throw new Error('创建 GPC 订单失败：API Key 剩余次数不足。');
       }
-      if (phoneMode === GPC_HELPER_PHONE_MODE_AUTO && !isGpcAutoModeEnabled(balanceData)) {
+      if (phoneMode === GPC_HELPER_PHONE_MODE_AUTO && isGpcAutoModePermissionDenied(balanceData)) {
         throw new Error('创建 GPC 订单失败：当前 GPC API Key 未开通自动模式。');
       }
     }
@@ -413,6 +442,9 @@
         gopayHelperRemoteStage: result.remoteStage,
         gopayHelperPhoneMode: result.phoneMode || normalizeGpcHelperPhoneMode(state?.gopayHelperPhoneMode || state?.phoneMode),
         gopayHelperTaskPayload: result.responsePayload,
+        gopayHelperTaskProgressSignature: '',
+        gopayHelperTaskProgressAt: 0,
+        gopayHelperTaskProgressTaskId: result.taskId,
         gopayHelperReferenceId: '',
         gopayHelperGoPayGuid: '',
         gopayHelperRedirectUrl: '',

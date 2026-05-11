@@ -30,6 +30,9 @@
       if (normalized === 'success') {
         return 'success';
       }
+      if (normalized === 'running' || /_running$/.test(normalized)) {
+        return 'running';
+      }
       if (normalized === 'failed' || /_failed$/.test(normalized)) {
         return 'failed';
       }
@@ -156,6 +159,9 @@
     function buildFailureLabel(finalStatus, failedStep, failureDetail = '') {
       if (finalStatus === 'success') {
         return '流程完成';
+      }
+      if (finalStatus === 'running') {
+        return '正在运行';
       }
       if (finalStatus === 'stopped') {
         if (Number.isInteger(failedStep) && failedStep > 0) {
@@ -519,6 +525,8 @@
         summary.total += 1;
         if (record.finalStatus === 'success') {
           summary.success += 1;
+        } else if (record.finalStatus === 'running') {
+          summary.running += 1;
         } else if (record.finalStatus === 'failed') {
           summary.failed += 1;
         } else if (record.finalStatus === 'stopped') {
@@ -529,6 +537,7 @@
       }, {
         total: 0,
         success: 0,
+        running: 0,
         failed: 0,
         stopped: 0,
         retryTotal: 0,

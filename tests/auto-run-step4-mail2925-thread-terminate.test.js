@@ -53,10 +53,23 @@ function extractFunction(name) {
 }
 
 const bundle = [
+  'const AUTO_RUN_STEP_IDLE_LOG_TIMEOUT_MS = 300000;',
+  'const AUTO_RUN_STEP_IDLE_LOG_CHECK_INTERVAL_MS = 5000;',
+  'const AUTO_RUN_STEP_IDLE_RESTART_MAX_ATTEMPTS = 3;',
+  "const AUTO_RUN_STEP_IDLE_RESTART_ERROR_PREFIX = 'AUTO_RUN_STEP_IDLE_RESTART::';",
   extractFunction('isAddPhoneAuthUrl'),
   extractFunction('isAddPhoneAuthState'),
   extractFunction('isMail2925ThreadTerminatedError'),
   extractFunction('isSignupUserAlreadyExistsFailure'),
+  extractFunction('isPlusCheckoutNonFreeTrialFailure'),
+  extractFunction('isPlusCheckoutRestartStep'),
+  extractFunction('isPlusCheckoutRestartRequiredFailure'),
+  extractFunction('getLatestLogTimestamp'),
+  extractFunction('buildAutoRunStepIdleRestartError'),
+  extractFunction('isAutoRunStepIdleRestartError'),
+  extractFunction('startAutoRunStepIdleLogWatchdog'),
+  extractFunction('runAutoStepActionWithIdleLogWatchdog'),
+  extractFunction('executeStepAndWaitWithAutoRunIdleLogWatchdog'),
   extractFunction('getPostStep6AutoRestartDecision'),
   extractFunction('runAutoSequenceFromStep'),
 ].join('\n');

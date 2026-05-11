@@ -56,7 +56,16 @@ const bundle = [
   extractFunction('isAddPhoneAuthFailure'),
   extractFunction('isAddPhoneAuthUrl'),
   extractFunction('isAddPhoneAuthState'),
+  extractFunction('isPlusCheckoutNonFreeTrialFailure'),
   extractFunction('isGpcCheckoutRestartRequiredFailure'),
+  extractFunction('isPlusCheckoutRestartStep'),
+  extractFunction('isPlusCheckoutRestartRequiredFailure'),
+  extractFunction('getLatestLogTimestamp'),
+  extractFunction('buildAutoRunStepIdleRestartError'),
+  extractFunction('isAutoRunStepIdleRestartError'),
+  extractFunction('startAutoRunStepIdleLogWatchdog'),
+  extractFunction('runAutoStepActionWithIdleLogWatchdog'),
+  extractFunction('executeStepAndWaitWithAutoRunIdleLogWatchdog'),
   extractFunction('getPostStep6AutoRestartDecision'),
   extractFunction('runAutoSequenceFromStep'),
 ].join('\n');
@@ -86,6 +95,10 @@ function createHarness(options = {}) {
     stepIds = Object.keys(stepDefinitions).map(Number).sort((a, b) => a - b),
     lastStepId = Math.max(...stepIds),
     finalOAuthChainStartStep = 7,
+    idleLogTimeoutMs = 300000,
+    idleLogCheckIntervalMs = 5000,
+    hangStep = 0,
+    hangBudget = 0,
   } = options;
 
   return new Function(`
@@ -94,6 +107,10 @@ const LAST_STEP_ID = ${JSON.stringify(lastStepId)};
 const FINAL_OAUTH_CHAIN_START_STEP = ${JSON.stringify(finalOAuthChainStartStep)};
 const SIGNUP_METHOD_PHONE = 'phone';
 const PLUS_PAYMENT_METHOD_GPC_HELPER = 'gpc-helper';
+const AUTO_RUN_STEP_IDLE_LOG_TIMEOUT_MS = ${JSON.stringify(idleLogTimeoutMs)};
+const AUTO_RUN_STEP_IDLE_LOG_CHECK_INTERVAL_MS = ${JSON.stringify(idleLogCheckIntervalMs)};
+const AUTO_RUN_STEP_IDLE_RESTART_MAX_ATTEMPTS = 3;
+const AUTO_RUN_STEP_IDLE_RESTART_ERROR_PREFIX = 'AUTO_RUN_STEP_IDLE_RESTART::';
 const LOG_PREFIX = '[test]';
 const chrome = {
   tabs: {
@@ -102,14 +119,17 @@ const chrome = {
 };
 
 let remainingFailures = ${JSON.stringify(failureBudget)};
+let remainingHangs = ${JSON.stringify(hangBudget)};
 const events = {
   steps: [],
   logs: [],
   invalidations: [],
+  cancellations: [],
+  stopBroadcasts: 0,
 };
 
 async function addLog(message, level = 'info') {
-  events.logs.push({ message, level });
+  events.logs.push({ message, level, timestamp: Date.now() });
 }
 
 async function ensureAutoEmailReady() {}
@@ -119,6 +139,7 @@ async function getState() {
   return {
     stepStatuses: { 3: 'completed' },
     mailProvider: '163',
+    logs: events.logs,
     ...${JSON.stringify(customState)},
   };
 }
@@ -140,6 +161,10 @@ function isStepDoneStatus(status) {
 }
 async function executeStepAndWait(step) {
   events.steps.push(step);
+  if (step === ${JSON.stringify(hangStep)} && remainingHangs > 0) {
+    remainingHangs -= 1;
+    return new Promise(() => {});
+  }
   if (step === ${JSON.stringify(failureStep)} && remainingFailures > 0) {
     remainingFailures -= 1;
     throw new Error(${JSON.stringify(failureMessage)});
@@ -150,6 +175,12 @@ async function getTabId() {
 }
 async function invalidateDownstreamAfterStepRestart(step, options = {}) {
   events.invalidations.push({ step, options });
+}
+function cancelPendingCommands(reason = '') {
+  events.cancellations.push(reason);
+}
+async function broadcastStopToContentScripts() {
+  events.stopBroadcasts += 1;
 }
 function getLoginAuthStateLabel(state) {
   return state || 'unknown';
@@ -222,6 +253,62 @@ test('auto-run keeps restarting from step 7 after post-login failures without a 
     ]
   );
   assert.ok(events.logs.some(({ message }) => /回到步骤 7 重新开始授权流程/.test(message)));
+});
+
+test('auto-run restarts the current step after five minutes without new logs', async () => {
+  const harness = createHarness({
+    startStep: 10,
+    failureStep: 0,
+    hangStep: 10,
+    hangBudget: 1,
+    idleLogTimeoutMs: 20,
+    idleLogCheckIntervalMs: 5,
+  });
+
+  const events = await harness.run();
+
+  assert.deepStrictEqual(events.steps, [10, 10]);
+  assert.deepStrictEqual(events.invalidations.map((entry) => entry.step), [9]);
+  assert.equal(events.cancellations.length, 1);
+  assert.equal(events.stopBroadcasts, 1);
+  assert.ok(events.logs.some(({ message }) => /5 分钟没有新日志，准备重新开始当前步骤/.test(message)));
+});
+
+test('auto-run applies the idle-log restart watchdog to early steps too', async () => {
+  const harness = createHarness({
+    startStep: 2,
+    failureStep: 0,
+    hangStep: 2,
+    hangBudget: 1,
+    idleLogTimeoutMs: 20,
+    idleLogCheckIntervalMs: 5,
+  });
+
+  const events = await harness.run();
+
+  assert.deepStrictEqual(events.steps, [2, 2, 4, 5, 6, 7, 8, 9, 10]);
+  assert.deepStrictEqual(events.invalidations.map((entry) => entry.step), [1]);
+  assert.equal(events.cancellations.length, 1);
+  assert.equal(events.stopBroadcasts, 1);
+});
+
+test('auto-run stops current-step idle restarts after the retry cap', async () => {
+  const harness = createHarness({
+    startStep: 10,
+    failureStep: 0,
+    hangStep: 10,
+    hangBudget: 4,
+    idleLogTimeoutMs: 20,
+    idleLogCheckIntervalMs: 5,
+  });
+
+  const result = await harness.runAndCaptureError();
+
+  assert.ok(result?.error);
+  assert.match(result.error.message, /AUTO_RUN_STEP_IDLE_RESTART::步骤 10/);
+  assert.deepStrictEqual(result.events.steps, [10, 10, 10, 10]);
+  assert.deepStrictEqual(result.events.invalidations.map((entry) => entry.step), [9, 9, 9]);
+  assert.ok(result.events.logs.some(({ message }) => /已连续 3 次因 5 分钟无新日志而重开/.test(message)));
 });
 
 test('auto-run stops restarting once add-phone is detected', async () => {
@@ -334,6 +421,182 @@ test('auto-run restarts from confirm-oauth step after transient step10 token_exc
   assert.ok(events.logs.some(({ message }) => /回到步骤 9 重新开始授权流程/.test(message)));
 });
 
+test('auto-run restarts Plus/GPC oauth-login aggregate entry-open failure from step 10', async () => {
+  const plusGpcSteps = {
+    6: { key: 'plus-checkout-create' },
+    7: { key: 'plus-checkout-billing' },
+    10: { key: 'oauth-login' },
+    11: { key: 'fetch-login-code' },
+    12: { key: 'confirm-oauth' },
+    13: { key: 'platform-verify' },
+  };
+  const harness = createHarness({
+    startStep: 10,
+    failureStep: 10,
+    failureBudget: 1,
+    failureMessage: '步骤 10：判断失败后已重试 2 次，仍未成功。最后原因：点击登录入口后仍未进入手机号/邮箱/密码/验证码页。',
+    authState: { state: 'entry_page', url: 'https://auth.openai.com/log-in' },
+    stepDefinitions: plusGpcSteps,
+    finalOAuthChainStartStep: 10,
+    customState: {
+      stepStatuses: { 3: 'completed', 6: 'completed', 7: 'completed' },
+      plusModeEnabled: true,
+      plusPaymentMethod: 'gpc-helper',
+      plusCheckoutSource: 'gpc-helper',
+    },
+  });
+
+  const events = await harness.run();
+
+  assert.deepStrictEqual(events.steps, [10, 10, 11, 12, 13]);
+  assert.deepStrictEqual(events.invalidations.map((entry) => entry.step), [9]);
+  assert.ok(events.logs.some(({ message }) => /回到步骤 10 重新开始授权流程/.test(message)));
+  assert.ok(!events.logs.some(({ message }) => /停止自动回到步骤 10 重开/.test(message)));
+});
+
+test('auto-run restarts Plus/GPC fetch-code and confirm-oauth failures from oauth-login step 10', async () => {
+  const plusGpcSteps = {
+    6: { key: 'plus-checkout-create' },
+    7: { key: 'plus-checkout-billing' },
+    10: { key: 'oauth-login' },
+    11: { key: 'fetch-login-code' },
+    12: { key: 'confirm-oauth' },
+    13: { key: 'platform-verify' },
+  };
+
+  for (const scenario of [
+    {
+      failureStep: 11,
+      failureMessage: '步骤 11：无法获取新的登录验证码。',
+      expectedSteps: [10, 11, 10, 11, 12, 13],
+    },
+    {
+      failureStep: 12,
+      failureMessage: '步骤 12：长时间未进入 OAuth 同意页，无法定位“继续”按钮。',
+      expectedSteps: [10, 11, 12, 10, 11, 12, 13],
+    },
+  ]) {
+    const harness = createHarness({
+      startStep: 10,
+      failureStep: scenario.failureStep,
+      failureBudget: 1,
+      failureMessage: scenario.failureMessage,
+      authState: { state: 'password_page', url: 'https://auth.openai.com/log-in' },
+      stepDefinitions: plusGpcSteps,
+      finalOAuthChainStartStep: 10,
+      customState: {
+        stepStatuses: { 3: 'completed', 6: 'completed', 7: 'completed' },
+        plusModeEnabled: true,
+        plusPaymentMethod: 'gpc-helper',
+        plusCheckoutSource: 'gpc-helper',
+      },
+    });
+
+    const events = await harness.run();
+
+    assert.deepStrictEqual(events.steps, scenario.expectedSteps);
+    assert.deepStrictEqual(events.invalidations.map((entry) => entry.step), [9]);
+    assert.ok(events.logs.some(({ message }) => new RegExp(`步骤 ${scenario.failureStep}：.*回到步骤 10 重新开始授权流程`).test(message)));
+  }
+});
+
+test('auto-run restarts Plus/GPC transient platform verify exchange failures from confirm-oauth step 12', async () => {
+  const plusGpcSteps = {
+    6: { key: 'plus-checkout-create' },
+    7: { key: 'plus-checkout-billing' },
+    10: { key: 'oauth-login' },
+    11: { key: 'fetch-login-code' },
+    12: { key: 'confirm-oauth' },
+    13: { key: 'platform-verify' },
+  };
+  const harness = createHarness({
+    startStep: 10,
+    failureStep: 13,
+    failureBudget: 1,
+    failureMessage: 'token exchange failed at https://auth.openai.com/oauth/token: token_exchange_user_error: Invalid request. Please try again later.',
+    authState: { state: 'oauth_consent_page', url: 'https://auth.openai.com/sign-in-with-chatgpt/codex/consent' },
+    stepDefinitions: plusGpcSteps,
+    finalOAuthChainStartStep: 10,
+    customState: {
+      stepStatuses: { 3: 'completed', 6: 'completed', 7: 'completed' },
+      plusModeEnabled: true,
+      plusPaymentMethod: 'gpc-helper',
+      plusCheckoutSource: 'gpc-helper',
+      panelMode: 'sub2api',
+    },
+  });
+
+  const events = await harness.run();
+
+  assert.deepStrictEqual(events.steps, [10, 11, 12, 13, 12, 13]);
+  assert.deepStrictEqual(events.invalidations.map((entry) => entry.step), [11]);
+  assert.ok(events.logs.some(({ message }) => /步骤 13：.*回到步骤 12 重新开始授权流程/.test(message)));
+});
+
+test('auto-run restarts Plus checkout from step 6 when checkout creation fails', async () => {
+  const plusPaypalSteps = {
+    6: { key: 'plus-checkout-create' },
+    7: { key: 'plus-checkout-billing' },
+    8: { key: 'paypal-approve' },
+    9: { key: 'plus-checkout-return' },
+    10: { key: 'oauth-login' },
+    11: { key: 'fetch-login-code' },
+    12: { key: 'confirm-oauth' },
+    13: { key: 'platform-verify' },
+  };
+  const harness = createHarness({
+    startStep: 6,
+    failureStep: 6,
+    failureBudget: 1,
+    failureMessage: '步骤 6：创建 Plus Checkout 失败：checkout request failed',
+    stepDefinitions: plusPaypalSteps,
+    finalOAuthChainStartStep: 10,
+    customState: {
+      stepStatuses: { 3: 'completed' },
+      plusModeEnabled: true,
+      plusPaymentMethod: 'paypal',
+    },
+  });
+
+  const events = await harness.run();
+
+  assert.deepStrictEqual(events.steps, [6, 6, 7, 8, 9, 10, 11, 12, 13]);
+  assert.deepStrictEqual(events.invalidations.map((entry) => entry.step), [5]);
+  assert.ok(events.logs.some(({ message }) => /回到步骤 6 重新创建 Plus Checkout/.test(message)));
+});
+
+test('auto-run restarts Plus checkout from step 6 when billing fails for non-free-trial reasons', async () => {
+  const plusPaypalSteps = {
+    6: { key: 'plus-checkout-create' },
+    7: { key: 'plus-checkout-billing' },
+    8: { key: 'paypal-approve' },
+    9: { key: 'plus-checkout-return' },
+    10: { key: 'oauth-login' },
+    11: { key: 'fetch-login-code' },
+    12: { key: 'confirm-oauth' },
+    13: { key: 'platform-verify' },
+  };
+  const harness = createHarness({
+    startStep: 6,
+    failureStep: 7,
+    failureBudget: 1,
+    failureMessage: '步骤 7：账单地址 iframe 无法注入，请重新创建 checkout。',
+    stepDefinitions: plusPaypalSteps,
+    finalOAuthChainStartStep: 10,
+    customState: {
+      stepStatuses: { 3: 'completed' },
+      plusModeEnabled: true,
+      plusPaymentMethod: 'paypal',
+    },
+  });
+
+  const events = await harness.run();
+
+  assert.deepStrictEqual(events.steps, [6, 7, 6, 7, 8, 9, 10, 11, 12, 13]);
+  assert.deepStrictEqual(events.invalidations.map((entry) => entry.step), [5]);
+  assert.ok(events.logs.some(({ message }) => /回到步骤 6 重新创建 Plus Checkout/.test(message)));
+});
+
 test('auto-run restarts GPC checkout from step 6 when step 7 task polling stalls', async () => {
   const plusGpcSteps = {
     6: { key: 'plus-checkout-create' },
@@ -399,6 +662,36 @@ test('auto-run treats GPC account binding as recoverable step 6 restart', async 
   assert.deepStrictEqual(events.invalidations.map((entry) => entry.step), [5]);
 });
 
+test('auto-run restarts GPC checkout from step 6 when accessToken cannot be read', async () => {
+  const plusGpcSteps = {
+    6: { key: 'plus-checkout-create' },
+    7: { key: 'plus-checkout-billing' },
+    10: { key: 'oauth-login' },
+    11: { key: 'fetch-login-code' },
+    12: { key: 'confirm-oauth' },
+    13: { key: 'platform-verify' },
+  };
+  const harness = createHarness({
+    startStep: 6,
+    failureStep: 6,
+    failureBudget: 1,
+    failureMessage: '步骤 6：GPC 模式获取 accessToken 失败。',
+    stepDefinitions: plusGpcSteps,
+    finalOAuthChainStartStep: 10,
+    customState: {
+      stepStatuses: { 3: 'completed' },
+      plusPaymentMethod: 'gpc-helper',
+      plusCheckoutSource: 'gpc-helper',
+    },
+  });
+
+  const events = await harness.run();
+
+  assert.deepStrictEqual(events.steps, [6, 6, 7, 10, 11, 12, 13]);
+  assert.deepStrictEqual(events.invalidations.map((entry) => entry.step), [5]);
+  assert.ok(events.logs.some(({ message }) => /回到步骤 6 重新创建 GPC 任务/.test(message)));
+});
+
 test('auto-run restarts GPC checkout from step 6 when task status has no progress', async () => {
   const plusGpcSteps = {
     6: { key: 'plus-checkout-create' },
@@ -427,6 +720,39 @@ test('auto-run restarts GPC checkout from step 6 when task status has no progres
   assert.deepStrictEqual(events.steps, [6, 7, 6, 7, 10, 11, 12, 13]);
   assert.deepStrictEqual(events.invalidations.map((entry) => entry.step), [5]);
   assert.ok(events.logs.some(({ message }) => /回到步骤 6 重新创建 GPC 任务/.test(message)));
+});
+
+test('auto-run keeps rebuilding GPC checkout beyond three failures', async () => {
+  const plusGpcSteps = {
+    6: { key: 'plus-checkout-create' },
+    7: { key: 'plus-checkout-billing' },
+    10: { key: 'oauth-login' },
+    11: { key: 'fetch-login-code' },
+    12: { key: 'confirm-oauth' },
+    13: { key: 'platform-verify' },
+  };
+  const harness = createHarness({
+    startStep: 6,
+    failureStep: 7,
+    failureBudget: 4,
+    failureMessage: 'GPC_TASK_ENDED::GPC task status stalled, recreate the task.',
+    stepDefinitions: plusGpcSteps,
+    finalOAuthChainStartStep: 10,
+    customState: {
+      stepStatuses: { 3: 'completed' },
+      plusPaymentMethod: 'gpc-helper',
+      plusCheckoutSource: 'gpc-helper',
+    },
+  });
+
+  const events = await harness.run();
+
+  assert.deepStrictEqual(
+    events.steps,
+    [6, 7, 6, 7, 6, 7, 6, 7, 6, 7, 10, 11, 12, 13]
+  );
+  assert.deepStrictEqual(events.invalidations.map((entry) => entry.step), [5, 5, 5, 5]);
+  assert.ok(events.logs.some(({ message }) => /第 4 次/.test(message)));
 });
 
 test('auto-run does not restart GPC checkout when Plus account has no free-trial eligibility', async () => {

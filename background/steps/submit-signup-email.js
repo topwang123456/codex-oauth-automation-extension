@@ -185,6 +185,33 @@
       });
     }
 
+    async function normalizeSignupTabWindowForStep2(tabId) {
+      if (
+        !Number.isInteger(tabId)
+        || typeof chrome?.tabs?.get !== 'function'
+        || typeof chrome?.windows?.update !== 'function'
+      ) {
+        return;
+      }
+
+      try {
+        const tab = await chrome.tabs.get(tabId);
+        const windowId = Number(tab?.windowId);
+        if (!Number.isInteger(windowId) || windowId < 0) {
+          return;
+        }
+
+        await chrome.windows.update(windowId, { state: 'normal', focused: true }).catch(() => {});
+        await chrome.windows.update(windowId, {
+          focused: true,
+          width: 1200,
+          height: 900,
+        }).catch(() => {});
+      } catch {
+        // Best-effort only: content-side retries still handle layout recovery.
+      }
+    }
+
     async function ensureSignupPhoneEntryReady(tabId) {
       if (!Number.isInteger(tabId)) {
         throw new Error('步骤 2：未找到可用的注册页标签，无法切换到手机号注册入口。');
@@ -230,6 +257,7 @@
         signupTabId = (await ensureSignupEntryPageReady(2)).tabId;
       } else {
         await chrome.tabs.update(signupTabId, { active: true });
+        await normalizeSignupTabWindowForStep2(signupTabId);
         await waitForStep2SignupTabToSettle(
           signupTabId,
           '步骤 2：已切换到注册页标签，正在等待页面加载完成并额外稳定 3 秒...'

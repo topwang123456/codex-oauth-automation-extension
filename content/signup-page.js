@@ -602,12 +602,38 @@ function getSignupEmailContinueButton({ allowDisabled = false } = {}) {
   }) || null;
 }
 
-function findSignupEntryTrigger() {
+function findSignupEntryTrigger(options = {}) {
+  const { allowHiddenFallback = true } = options || {};
   const candidates = document.querySelectorAll('a, button, [role="button"], [role="link"]');
-  return Array.from(candidates).find((el) => {
-    if (!isVisibleElement(el) || !isActionEnabled(el)) return false;
-    return SIGNUP_ENTRY_TRIGGER_PATTERN.test(getActionText(el));
-  }) || null;
+  let hiddenSignupTrigger = null;
+
+  for (const el of Array.from(candidates)) {
+    if (!isActionEnabled(el)) continue;
+    if (!SIGNUP_ENTRY_TRIGGER_PATTERN.test(getActionText(el))) continue;
+    if (isVisibleElement(el)) {
+      return el;
+    }
+    if (!hiddenSignupTrigger) {
+      hiddenSignupTrigger = el;
+    }
+  }
+
+  if (!allowHiddenFallback || !hiddenSignupTrigger) {
+    return null;
+  }
+
+  const view = typeof window !== 'undefined' ? window : globalThis;
+  const collapsedViewport = Boolean(
+    Math.round(Number(view?.innerWidth) || 0) < 240
+    || Math.round(Number(view?.innerHeight) || 0) < 160
+    || Math.round(Number(view?.outerWidth) || 0) < 320
+    || Math.round(Number(view?.outerHeight) || 0) < 180
+  );
+  const pageText = typeof getPageTextSnapshot === 'function'
+    ? getPageTextSnapshot()
+    : '';
+  const looksLikeLoggedOutHome = /登录|登入|log\s*in|sign\s*in/i.test(pageText);
+  return collapsedViewport || looksLikeLoggedOutHome ? hiddenSignupTrigger : null;
 }
 
 function getSignupPasswordDisplayedEmail() {
@@ -719,6 +745,7 @@ function getSignupEntryStateSummary(snapshot = inspectSignupEntryState()) {
     summary.signupTrigger = {
       tag: (snapshot.signupTrigger.tagName || '').toLowerCase(),
       text: getActionText(snapshot.signupTrigger).slice(0, 80),
+      visible: isVisibleElement(snapshot.signupTrigger),
     };
   }
 
@@ -1085,9 +1112,13 @@ async function waitForSignupEntryState(options = {}) {
           : `步骤 ${step}：已找到官网注册入口，等待 3 秒后点击...`);
         await sleep(3000);
         throwIfStopped();
+        const clickTarget = findSignupEntryTrigger({ allowHiddenFallback: false }) || snapshot.signupTrigger;
+        if (!isVisibleElement(clickTarget)) {
+          log(`步骤 ${step}：注册入口仍处于不可见状态，继续按入口重试节奏尝试恢复点击...`, 'warn');
+        }
         await humanPause(350, 900);
         await performOperationWithDelay({ stepKey: 'signup-entry', kind: 'click', label: 'open-signup-entry' }, async () => {
-          simulateClick(snapshot.signupTrigger);
+          simulateClick(clickTarget);
         });
       }
     }
@@ -2380,9 +2411,13 @@ async function waitForSignupPhoneEntryState(options = {}) {
           : `步骤 ${step}：已找到官网注册入口，等待 3 秒后点击...`);
         await sleep(3000);
         throwIfStopped();
+        const clickTarget = findSignupEntryTrigger({ allowHiddenFallback: false }) || snapshot.signupTrigger;
+        if (!isVisibleElement(clickTarget)) {
+          log(`步骤 ${step}：注册入口仍处于不可见状态，继续按入口重试节奏尝试恢复点击...`, 'warn');
+        }
         await humanPause(350, 900);
         await performOperationWithDelay({ stepKey: 'signup-phone-entry', kind: 'click', label: 'open-signup-entry' }, async () => {
-          simulateClick(snapshot.signupTrigger);
+          simulateClick(clickTarget);
         });
       }
       await sleep(250);

@@ -1081,6 +1081,75 @@ test('GPC billing fails repeated checkout stage as stale so auto-run can recreat
   assert.equal(events.logs.some((entry) => entry.message === '步骤 7：GPC 任务状态：创建订单'), true);
 });
 
+test('GPC billing fails unchanged visible created status even when hidden ids change', async () => {
+  const originalNow = Date.now;
+  let now = 1710000000000;
+  let queryCount = 0;
+  const fetchCalls = [];
+  const { events, executor } = createExecutorHarness({
+    frames: [],
+    stateByFrame: {},
+    sleepWithStop: async (ms) => {
+      events.sleeps.push(ms);
+      now += ms;
+    },
+    fetchImpl: async (url, options = {}) => {
+      fetchCalls.push({ url, options });
+      if (url === 'https://gpc.qlhazycoder.top/api/gp/tasks/task_created') {
+        queryCount += 1;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => createGpcTaskResponse({
+            task_id: 'task_created',
+            phone_mode: 'auto',
+            status: 'created',
+            status_text: '已创建',
+            remote_stage: '',
+            api_waiting_for: '',
+            reference_id: `ref_${queryCount}`,
+            flow_id: `flow_${queryCount}`,
+          }),
+        };
+      }
+      if (url.endsWith('/api/gp/tasks/task_created/stop')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => createGpcTaskResponse({
+            task_id: 'task_created',
+            status: 'discarded',
+            status_text: '已停止',
+          }),
+        };
+      }
+      throw new Error(`unexpected url: ${url}`);
+    },
+  });
+
+  Date.now = () => now;
+  try {
+    await assert.rejects(
+      () => executor.executePlusCheckoutBilling({
+        plusPaymentMethod: 'gpc-helper',
+        plusCheckoutSource: 'gpc-helper',
+        gopayHelperTaskId: 'task_created',
+        gopayHelperPhoneMode: 'auto',
+        gopayHelperApiUrl: 'https://gpc.qlhazycoder.top/',
+        gopayHelperApiKey: 'gpc_auto',
+        gopayHelperTaskStaleSeconds: 15,
+      }),
+      /GPC_TASK_ENDED::GPC 任务状态超过 15 秒无进展（已创建），请重新创建任务。/
+    );
+  } finally {
+    Date.now = originalNow;
+  }
+
+  assert.equal(queryCount > 1, true);
+  assert.equal(fetchCalls.some((call) => call.url.endsWith('/api/gp/tasks/task_created/stop')), true);
+  assert.equal(events.logs.some((entry) => entry.message === '步骤 7：GPC 任务状态：已创建'), true);
+});
+
 test('GPC billing reads SMS OTP from local helper for sms_otp_wait', async () => {
   const fetchCalls = [];
   let pollCount = 0;

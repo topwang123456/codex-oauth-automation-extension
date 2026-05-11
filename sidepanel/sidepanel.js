@@ -2081,6 +2081,23 @@ function syncLatestState(nextState) {
   renderAccountRecords(latestState);
 }
 
+let accountRunHistoryRefreshTimer = null;
+
+function scheduleAccountRunHistoryRefresh(delayMs = 150) {
+  if (accountRunHistoryRefreshTimer) {
+    clearTimeout(accountRunHistoryRefreshTimer);
+  }
+  accountRunHistoryRefreshTimer = setTimeout(() => {
+    accountRunHistoryRefreshTimer = null;
+    chrome.runtime.sendMessage({ type: 'GET_STATE', source: 'sidepanel' }).then(state => {
+      syncLatestState(state);
+      syncAutoRunState(state);
+      updateStatusDisplay(latestState);
+      updateButtonStates();
+    }).catch(() => { });
+  }, Math.max(0, Number(delayMs) || 0));
+}
+
 function normalizeOperationDelayEnabled(value) {
   return typeof value === 'boolean' ? value : true;
 }
@@ -2166,22 +2183,55 @@ function getGpcHelperAutoModeEnabled(state = latestState) {
   return Boolean(state?.gopayHelperAutoModeEnabled);
 }
 
-function hasGpcAutoModePermissionField(payload = {}) {
-  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+function normalizeGpcAutoModePermissionValue(value) {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+  if (typeof value === 'number') {
+    if (value === 1) return true;
+    if (value === 0) return false;
+  }
+  const normalized = String(value ?? '').trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+  if (['true', '1', 'yes', 'y', 'on', 'enabled', 'enable'].includes(normalized)) {
+    return true;
+  }
+  if (['false', '0', 'no', 'n', 'off', 'disabled', 'disable'].includes(normalized)) {
     return false;
   }
-  return payload.auto_mode_enabled !== undefined
-    || payload.autoModeEnabled !== undefined
-    || payload.auto_enabled !== undefined
-    || payload.autoEnabled !== undefined
-    || (payload.data && typeof payload.data === 'object' && !Array.isArray(payload.data) && hasGpcAutoModePermissionField(payload.data));
+  return null;
+}
+
+function getGpcAutoModePermissionFromPayload(payload = {}) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return null;
+  }
+  for (const key of ['auto_mode_enabled', 'autoModeEnabled', 'auto_enabled', 'autoEnabled']) {
+    if (payload[key] !== undefined) {
+      return normalizeGpcAutoModePermissionValue(payload[key]);
+    }
+  }
+  if (payload.data && typeof payload.data === 'object' && !Array.isArray(payload.data)) {
+    return getGpcAutoModePermissionFromPayload(payload.data);
+  }
+  return null;
+}
+
+function shouldPreserveSelectedGpcAutoMode(state = latestState) {
+  const payloadPermission = getGpcAutoModePermissionFromPayload(state?.gopayHelperBalancePayload);
+  return normalizeGpcHelperPhoneModeValue(state?.gopayHelperPhoneMode) === GPC_HELPER_PHONE_MODE_AUTO
+    && (Boolean(state?.gopayHelperAutoModeEnabled) || payloadPermission === true);
+}
+
+function hasGpcAutoModePermissionField(payload = {}) {
+  return getGpcAutoModePermissionFromPayload(payload) !== null;
 }
 
 function isGpcAutoModePermissionDenied(state = latestState) {
-  if (getGpcHelperAutoModeEnabled(state)) {
-    return false;
-  }
-  return hasGpcAutoModePermissionField(state?.gopayHelperBalancePayload);
+  const payloadPermission = getGpcAutoModePermissionFromPayload(state?.gopayHelperBalancePayload);
+  return payloadPermission === false;
 }
 
 function normalizeGpcRemainingUsesValue(value) {
@@ -3446,7 +3496,10 @@ function collectSettingsPayload() {
       ? selectGpcHelperPhoneMode.value
       : (latestState?.gopayHelperPhoneMode || 'manual')
   );
-  const effectiveGpcPhoneMode = (typeof isGpcAutoModePermissionDenied === 'function' && isGpcAutoModePermissionDenied(latestState))
+  const preserveSelectedGpcAutoMode = typeof shouldPreserveSelectedGpcAutoMode === 'function'
+    ? shouldPreserveSelectedGpcAutoMode(latestState)
+    : false;
+  const effectiveGpcPhoneMode = (!preserveSelectedGpcAutoMode && typeof isGpcAutoModePermissionDenied === 'function' && isGpcAutoModePermissionDenied(latestState))
     ? 'manual'
     : selectedGpcPhoneMode;
   const selectedGpcOtpChannel = normalizeGpcOtpChannelSafe(
@@ -7431,7 +7484,11 @@ function updatePlusModeUI() {
   );
   const gpcAutoModeDenied = isGpcAutoModePermissionDenied(latestState);
   const gpcAutoModeEnabled = getGpcHelperAutoModeEnabled(latestState);
-  const isGpcAutoMode = !gpcAutoModeDenied && gpcPhoneMode === GPC_HELPER_PHONE_MODE_AUTO;
+  const preserveSelectedGpcAutoMode = typeof shouldPreserveSelectedGpcAutoMode === 'function'
+    ? shouldPreserveSelectedGpcAutoMode(latestState)
+    : false;
+  const effectiveGpcAutoModeDenied = gpcAutoModeDenied && !preserveSelectedGpcAutoMode;
+  const isGpcAutoMode = !effectiveGpcAutoModeDenied && gpcPhoneMode === GPC_HELPER_PHONE_MODE_AUTO;
   const gpcOtpChannel = normalizeGpcOtpChannelValue(
     typeof selectGpcHelperOtpChannel !== 'undefined' && selectGpcHelperOtpChannel
       ? selectGpcHelperOtpChannel.value
@@ -7446,7 +7503,7 @@ function updatePlusModeUI() {
     ? normalizePlusPaymentMethod(selectPlusPaymentMethod.value)
     : method;
   const gpcRowsVisible = enabled && selectedMethod === gpcValue;
-  const canShowGpcModeSelector = gpcRowsVisible && (gpcAutoModeEnabled || !gpcAutoModeDenied);
+  const canShowGpcModeSelector = gpcRowsVisible && (gpcAutoModeEnabled || !effectiveGpcAutoModeDenied);
   const localSmsControlsVisible = gpcRowsVisible && !isGpcAutoMode;
   const effectiveLocalSmsEnabled = !isGpcAutoMode && localSmsEnabled;
   if (typeof selectPlusPaymentMethod !== 'undefined' && selectPlusPaymentMethod) {
@@ -7491,7 +7548,7 @@ function updatePlusModeUI() {
     rowGpcHelperPhoneMode.style.display = canShowGpcModeSelector ? '' : 'none';
   }
   if (typeof selectGpcHelperPhoneMode !== 'undefined' && selectGpcHelperPhoneMode) {
-    selectGpcHelperPhoneMode.value = gpcAutoModeDenied ? GPC_HELPER_PHONE_MODE_MANUAL : gpcPhoneMode;
+    selectGpcHelperPhoneMode.value = effectiveGpcAutoModeDenied ? GPC_HELPER_PHONE_MODE_MANUAL : gpcPhoneMode;
   }
   [
     typeof rowGpcHelperCountryCode !== 'undefined' ? rowGpcHelperCountryCode : null,
@@ -7796,7 +7853,7 @@ async function ensureGpcApiKeyReadyForStart(options = {}) {
     return false;
   }
 
-  if (selectedMode === GPC_HELPER_PHONE_MODE_AUTO && !balanceState.gopayHelperAutoModeEnabled) {
+  if (selectedMode === GPC_HELPER_PHONE_MODE_AUTO && isGpcAutoModePermissionDenied(balanceState)) {
     if (typeof selectGpcHelperPhoneMode !== 'undefined' && selectGpcHelperPhoneMode) {
       selectGpcHelperPhoneMode.value = GPC_HELPER_PHONE_MODE_MANUAL;
     }
@@ -11868,14 +11925,22 @@ btnGpcHelperBalance?.addEventListener('click', async () => {
       gopayHelperAutoModeEnabled: getGpcAutoModeEnabledFromResponse(response),
       gopayHelperApiKeyStatus: response?.apiKeyStatus || response?.data?.status || response?.payload?.data?.status || response?.payload?.status || '',
     };
+    const nextAutoModePermission = getGpcAutoModePermissionFromPayload(nextState.gopayHelperBalancePayload);
+    const nextAutoModeDenied = nextAutoModePermission === false;
+    const nextAutoModeConfirmed = nextAutoModePermission === true || nextState.gopayHelperAutoModeEnabled;
+    const selectedModeBeforeBalanceState = getSelectedGpcHelperPhoneMode();
     syncLatestState(nextState);
-    if (!nextState.gopayHelperAutoModeEnabled && getSelectedGpcHelperPhoneMode() === GPC_HELPER_PHONE_MODE_AUTO) {
+    if (nextAutoModeDenied && selectedModeBeforeBalanceState === GPC_HELPER_PHONE_MODE_AUTO) {
       selectGpcHelperPhoneMode.value = GPC_HELPER_PHONE_MODE_MANUAL;
       syncLatestState({ gopayHelperPhoneMode: GPC_HELPER_PHONE_MODE_MANUAL });
       await saveSettings({ silent: true, force: true }).catch(() => {});
       showToast('当前 API Key 未开通自动模式，已切回手动模式。', 'warn');
+    } else if (nextAutoModeDenied) {
+      showToast('GPC 余额已更新，当前 API Key 只能使用手动模式。', 'success');
+    } else if (nextAutoModeConfirmed) {
+      showToast('GPC 余额已更新，自动模式可用。', 'success');
     } else {
-      showToast(nextState.gopayHelperAutoModeEnabled ? 'GPC 余额已更新，自动模式可用。' : 'GPC 余额已更新，当前 API Key 只能使用手动模式。', 'success');
+      showToast('GPC 余额已更新，当前接口未返回自动模式权限，已保留所选模式。', 'success');
     }
     updatePlusModeUI();
   } catch (error) {
@@ -13511,6 +13576,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       appendLog(message.payload);
       if (message.payload.level === 'error') {
         showToast(message.payload.message, 'error');
+        scheduleAccountRunHistoryRefresh();
       }
       break;
 
@@ -13841,7 +13907,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       if (message.payload.gopayHelperPhoneMode !== undefined && selectGpcHelperPhoneMode) {
         selectGpcHelperPhoneMode.value = normalizeGpcHelperPhoneModeValue(message.payload.gopayHelperPhoneMode);
       }
-      if (message.payload.gopayHelperAutoModeEnabled === false && selectGpcHelperPhoneMode?.value === GPC_HELPER_PHONE_MODE_AUTO) {
+      if (message.payload.gopayHelperAutoModeEnabled === false
+        && selectGpcHelperPhoneMode?.value === GPC_HELPER_PHONE_MODE_AUTO
+        && isGpcAutoModePermissionDenied(latestState)) {
         selectGpcHelperPhoneMode.value = GPC_HELPER_PHONE_MODE_MANUAL;
         syncLatestState({ gopayHelperPhoneMode: GPC_HELPER_PHONE_MODE_MANUAL });
         showToast('当前 API Key 未开通自动模式，已切回手动模式。', 'warn', 2200);
@@ -14266,6 +14334,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       applyAutoRunStatus(message.payload);
       updateStatusDisplay(latestState);
       updateButtonStates();
+      if (!['scheduled', 'running', 'waiting_step', 'waiting_email', 'retrying', 'waiting_interval'].includes(message.payload.phase)) {
+        scheduleAccountRunHistoryRefresh();
+      }
       break;
     }
 

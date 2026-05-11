@@ -561,6 +561,139 @@ return {
   assert.equal(api.getLogs().some(({ message, level }) => level === 'warn' && /已完成 5 次重试/.test(message)), true);
 });
 
+test('waitForSignupEntryState treats hidden signup action on collapsed logged-out home as retryable entry', async () => {
+  const api = new Function(`
+const logs = [];
+const clicks = [];
+let now = 0;
+
+const signupButton = {
+  textContent: '免费注册',
+  value: '',
+  disabled: false,
+  getAttribute(name) {
+    if (name === 'type') return 'button';
+    return '';
+  },
+  getBoundingClientRect() {
+    return { width: 0, height: 0 };
+  },
+};
+
+const document = {
+  querySelector() {
+    return null;
+  },
+  querySelectorAll(selector) {
+    if (selector === 'a, button, [role="button"], [role="link"]') {
+      return [signupButton];
+    }
+    return [];
+  },
+};
+
+const window = {
+  innerWidth: 0,
+  innerHeight: 0,
+  outerWidth: 159,
+  outerHeight: 27,
+};
+
+const location = {
+  href: 'https://chatgpt.com/',
+};
+
+const Date = {
+  now() {
+    return now;
+  },
+};
+
+${extractConst('SIGNUP_ENTRY_TRIGGER_PATTERN')}
+${extractConst('SIGNUP_EMAIL_INPUT_SELECTOR')}
+${extractConst('SIGNUP_PHONE_INPUT_SELECTOR')}
+
+function isVisibleElement(el) {
+  const rect = el?.getBoundingClientRect?.() || { width: 0, height: 0 };
+  return rect.width > 0 && rect.height > 0;
+}
+
+function isActionEnabled(el) {
+  return Boolean(el) && !el.disabled && el.getAttribute('aria-disabled') !== 'true';
+}
+
+function getActionText(el) {
+  return [el?.textContent, el?.value, el?.getAttribute?.('aria-label'), el?.getAttribute?.('title')]
+    .filter(Boolean)
+    .join(' ')
+    .replace(/\\s+/g, ' ')
+    .trim();
+}
+
+function getPageTextSnapshot() {
+  return '跳至内容 ChatGPT 登录 我们先从哪里开始呢？';
+}
+
+function getSignupPasswordInput() {
+  return null;
+}
+
+function isSignupPasswordPage() {
+  return false;
+}
+
+function getSignupPasswordSubmitButton() {
+  return null;
+}
+
+function getSignupPasswordDisplayedEmail() {
+  return '';
+}
+
+function throwIfStopped() {}
+
+function log(message, level = 'info') {
+  logs.push({ message, level });
+}
+
+async function humanPause() {}
+
+function simulateClick(target) {
+  clicks.push(getActionText(target));
+}
+
+async function sleep(ms) {
+  now += ms;
+}
+
+${extractFunction('getSignupEmailInput')}
+${extractFunction('getSignupPhoneInput')}
+${extractFunction('getSignupEmailContinueButton')}
+${extractFunction('findSignupEntryTrigger')}
+${extractFunction('inspectSignupEntryState')}
+${extractFunction('waitForSignupEntryState')}
+
+return {
+  async run() {
+    return waitForSignupEntryState({ timeout: 30000, autoOpenEntry: true, step: 2 });
+  },
+  getClicks() {
+    return clicks.slice();
+  },
+  getLogs() {
+    return logs.slice();
+  },
+};
+`)();
+
+  const snapshot = await api.run();
+
+  assert.equal(snapshot.state, 'entry_home');
+  assert.equal(api.getClicks().length, 6);
+  assert.equal(api.getLogs().some(({ message }) => message.includes('注册入口仍处于不可见状态')), true);
+  assert.equal(api.getLogs().some(({ message, level }) => level === 'warn' && /已完成 5 次重试/.test(message)), true);
+});
+
 test('ensureSignupPhoneEntryReady opens free signup before switching to the phone entry', async () => {
   const api = new Function(`
 const logs = [];

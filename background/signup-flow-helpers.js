@@ -35,6 +35,23 @@
         return null;
       }
 
+      if (typeof chrome?.tabs?.get === 'function' && typeof chrome?.windows?.update === 'function') {
+        try {
+          const tab = await chrome.tabs.get(tabId);
+          const windowId = Number(tab?.windowId);
+          if (Number.isInteger(windowId) && windowId >= 0) {
+            await chrome.windows.update(windowId, { state: 'normal', focused: true }).catch(() => {});
+            await chrome.windows.update(windowId, {
+              focused: true,
+              width: 1200,
+              height: 900,
+            }).catch(() => {});
+          }
+        } catch {
+          // Best-effort only. Step 2 still has content-side entry retries.
+        }
+      }
+
       if (typeof addLog === 'function') {
         await addLog(
           `步骤 ${step}：注册页已打开，正在等待页面加载完成并额外稳定 3 秒...`,

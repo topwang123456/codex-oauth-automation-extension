@@ -126,6 +126,20 @@ test('account run history helper upgrades old records, keeps stopped items and s
   assert.equal(genericStoppedRecord.failureLabel, '流程已停止');
   assert.equal(genericStoppedRecord.failedStep, null);
 
+  const runningRecord = helpers.buildAccountRunHistoryRecord({
+    email: 'run@b.com',
+    password: 'z',
+    autoRunning: true,
+    autoRunCurrentRun: 1,
+    autoRunTotalRuns: 2,
+    autoRunAttemptRun: 1,
+  }, 'running', '正在运行');
+  assert.equal(runningRecord.finalStatus, 'running');
+  assert.equal(runningRecord.failureLabel, '正在运行');
+  assert.equal(runningRecord.failureDetail, '');
+  assert.equal(runningRecord.failedStep, null);
+  assert.equal(runningRecord.source, 'auto');
+
   const normalizedStoppedRecord = helpers.normalizeAccountRunHistoryRecord({
     recordId: 'legacy-stop@example.com',
     email: 'legacy-stop@example.com',
@@ -471,6 +485,7 @@ test('account run history helper clears persisted records and syncs full snapsho
   assert.deepStrictEqual(payload.summary, {
     total: 1,
     success: 0,
+    running: 0,
     failed: 1,
     stopped: 0,
     retryTotal: 1,
@@ -486,6 +501,7 @@ test('account run history helper clears persisted records and syncs full snapsho
     summary: {
       total: 0,
       success: 0,
+      running: 0,
       failed: 0,
       stopped: 0,
       retryTotal: 0,
@@ -586,6 +602,7 @@ test('account run history helper deletes selected records and syncs remaining sn
     summary: {
       total: 1,
       success: 1,
+      running: 0,
       failed: 0,
       stopped: 0,
       retryTotal: 0,
